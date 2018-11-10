@@ -1,0 +1,2 @@
+#define HAVE_SYS_SELECT_H 1
+#define HAVE_SYS_TYPES_H 1

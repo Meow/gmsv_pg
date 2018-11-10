@@ -1,0 +1,1 @@
+#define PQXX_PQ_IN_NAMESPACE 1

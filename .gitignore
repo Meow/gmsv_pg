@@ -1,0 +1,6 @@
+bin/
+project/
+.vscode/
+
+gloo-cppcheck-build-dir/
+gloo.cppcheck
