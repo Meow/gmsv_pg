@@ -100,12 +100,6 @@ public:
         }
       }
 
-      // Run the next query in the queue.
-      if (this->next_query != nullptr)
-        this->next_query->_spawn_thread(state);
-      else
-        DatabaseQuery::last_query = nullptr; // we're the last query
-
       if (!this->_sync)
         Emit("success", res_t, size);
       else {
@@ -129,6 +123,12 @@ public:
       LUA->PushString("pg - no error");
       return 2;
     } else {
+      // Run the next query in the queue.
+      if (this->next_query != nullptr)
+        this->next_query->_spawn_thread(state);
+      else
+        DatabaseQuery::last_query = nullptr; // we're the last query
+
       return 0;
     }
   }
