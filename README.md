@@ -47,7 +47,7 @@ pg.version_suffix
 -- DatabaseConnection class
 
 -- Connect to the specified database.
-function DatabaseConnection:connect(host, user, password, db, port)
+function DatabaseConnection:connect(host, user, password, db, port, extra_string_to_append)
 
 -- Disconnect from current database.
 function DatabaseConnection:disconnect()
