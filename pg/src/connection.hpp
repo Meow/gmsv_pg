@@ -78,12 +78,13 @@ public:
   }
 
   LUA_METHOD(connect) {
-    auto obj = Pop(state, 1);
+    auto obj      = Pop(state, 1);
     auto hostname = LuaValue::Pop(state, 2);
     auto username = LuaValue::Pop(state, 3);
     auto password = LuaValue::Pop(state, 4);
     auto database = LuaValue::Pop(state, 5);
-    auto port = LuaValue::Pop(state, 6);
+    auto port     = LuaValue::Pop(state, 6);
+    auto extra    = LuaValue::Pop(state, 7);
     std::string connection_string = "";
 
     if (hostname.type() == Type::STRING)
@@ -108,6 +109,9 @@ public:
       int _port = port;
       connection_string += " port=" + std::to_string(_port);
     }
+
+    if (extra.type() == Type::STRING)
+      connection_string += " " + std::string(extra);
 
     try {
       obj->_connection = new pqxx::connection(connection_string);
