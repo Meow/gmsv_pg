@@ -2,7 +2,7 @@
 A PostgreSQL adapter for Garry's Mod.
 
 ## Installation
-The pre-compiled binaries are located in the `pg/bin` folder.
+The pre-compiled binaries are located in the `releases` section of this repo.
 
 Copy-paste the `gmsv_pg_*.dll` to your server's `lua/bin` folder, where `*` if your platform's suffix (win32 or linux). Then follow the platform-specific instructions below:
 
