@@ -1,7 +1,0 @@
-﻿  CCompat.cpp
-  connection.c
-  lua_shared.c
-  main.c
-  Generating Code...
-     Creating library ..\bin\gmsv_pg2_win32.lib and object ..\bin\gmsv_pg2_win32.exp
-  pg2.vcxproj -> C:\Users\meow\Documents\GitHub\gmsv_pg2\project\..\bin\gmsv_pg2_win32.dll

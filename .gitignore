@@ -1,0 +1,12 @@
+.vscode
+*/.vscode
+.vs/
+Release/
+Debug/
+bin/
+project/
+*.sln
+*.vcxproj
+*.vcproj 
+*.filters
+*.user
