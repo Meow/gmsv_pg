@@ -5,10 +5,11 @@
 #include <Windows.h>
 #else
 #include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <dlfcn.h>
 #endif
+
+#include <stdio.h>
+#include <stdlib.h>
 
 #include <gmodc/lua/interface.h>
 
