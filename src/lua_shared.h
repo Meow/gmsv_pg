@@ -12,15 +12,7 @@
 
 #include <gmodc/lua/interface.h>
 
-#define GMOD_FUNC_WITH_STATE(FUNC)               \
-  int FUNC##__Imp(lua_State *L, luabase_t *LUA); \
-  int FUNC(lua_State *L)                         \
-  {                                              \
-    luabase_t *LUA = lua_get_base(L);            \
-    lua_set_state(LUA, L);                       \
-    return FUNC##__Imp(L, LUA);                  \
-  }                                              \
-  int FUNC##__Imp(lua_State *L, luabase_t *LUA)
+#define LUA_BASELESS_FUNC(FUNC) int FUNC(lua_State *L)
 
 /*
   Most of the definitions are taken from LuaJIT's source code.

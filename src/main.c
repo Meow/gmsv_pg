@@ -7,8 +7,8 @@
 #define PG_VERSION_PATCH "0"
 #define PG_VERSION_SUFFX "development"
 
-LUA_FUNCTION(gmpg_new_connection) {
-  return gmpg_new(LUA);
+LUA_BASELESS_FUNC(gmpg_new_connection) {
+  return gmpg_new(L);
 }
 
 DLL_EXPORT int gmod13_open(lua_State *state) {
