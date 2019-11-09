@@ -1,6 +1,6 @@
 #include "lua_shared.h"
 
-#define LUA_SHARED_DEFINITION(name) name##_t name = NULL;
+#define LUA_SHARED_DEFINITION(name) name##_t name = NULL
 
 LUA_SHARED_DEFINITION(lua_atpanic);
 LUA_SHARED_DEFINITION(lua_checkstack);

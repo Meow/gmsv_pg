@@ -49,7 +49,7 @@ project 'pg2'
     if ansi_c then
       buildoptions { '-ansi', '-pedantic' }
     else
-      buildoptions { '-pedantic' }
+      buildoptions { '-pedantic', '-std='..string.lower(config.std) }
     end
 
     pic 'On'

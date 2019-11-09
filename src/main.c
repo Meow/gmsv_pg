@@ -1,4 +1,5 @@
 #include "connection.h"
+#include <stdio.h>
 
 #define PG_VERSION "2.0.0"
 #define PG_VERSION_MAJOR "2"

@@ -5,6 +5,9 @@
 #include <Windows.h>
 #else
 #include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <dlfcn.h>
 #endif
 
 #include <gmodc/lua/interface.h>
@@ -50,7 +53,6 @@ typedef const char * (*lua_Reader) (lua_State *L, void *ud, size_t *sz);
 typedef int (*lua_Writer) (lua_State *L, const void* p, size_t sz, void* ud);
 typedef struct lua_Debug lua_Debug;  /* activation record */
 typedef void (*lua_Hook) (lua_State *L, lua_Debug *ar);
-typedef void * (*lua_Alloc) (void *ud, void *ptr, size_t osize, size_t nsize);
 
 typedef struct luaL_Buffer {
   char *p;			/* current position in buffer */
@@ -66,14 +68,20 @@ typedef struct luaL_Reg {
 
 #ifdef _WIN32
 typedef HMODULE module_handle;
-#define GET_MOD_FUNC(what) what = (what##_t)GetProcAddress(lua_shared, #what)
+#define GET_MOD_FUNC(what) what##_u.symbol = GetProcAddress(lua_shared, #what); \
+  what = what##_u.function;
 #else
 typedef void* module_handle;
-#define GET_MOD_FUNC(fname) what = (what##_t)dlsym(lua_shared, #what)
+#define GET_MOD_FUNC(what) what##_u.symbol = dlsym(lua_shared, #what); \
+  what = what##_u.function;
 #endif
 
 #define LUA_SHARED_FUNC(type, name, ...)  \
-typedef type(*name##_t)(##__VA_ARGS__);   \
+typedef type( *name##_t )( __VA_ARGS__ ); \
+union { \
+  void *symbol; \
+  name##_t function; \
+} name##_u; \
 extern name##_t name
 
 LUA_SHARED_FUNC(lua_State*, luaL_newstate, void);
