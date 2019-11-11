@@ -183,7 +183,7 @@ int gmpg_error_message(lua_State *L) {
 }
 
 int gmpg_set_encoding(lua_State *L) {
-  char encoding_query[128];
+  char encoding_query[64];
   PGresult *res;
 
   GET_CONNECTION_OBJECT
@@ -197,6 +197,8 @@ int gmpg_set_encoding(lua_State *L) {
     lua_pushboolean(L, 0);
   } else
     lua_pushboolean(L, 1);
+
+  PQclear(res);
 
   return 1;
 }
