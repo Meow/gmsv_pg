@@ -27,5 +27,6 @@ int gmpg_user(lua_State *L);
 int gmpg_pass(lua_State *L);
 int gmpg_host(lua_State *L);
 int gmpg_port(lua_State *L);
+int gmpg_set_encoding(lua_State *L);
 
 #endif

@@ -23,6 +23,7 @@ int gmpg_connection_push_mt(lua_State *L) {
       "protocol_version", gmpg_protocol_version,
       "server_version", gmpg_server_version,
       "error_message", gmpg_error_message,
+      "set_encoding", gmpg_set_encoding,
       "db", gmpg_db,
       "user", gmpg_user,
       "pass", gmpg_pass,
@@ -177,6 +178,25 @@ int gmpg_error_message(lua_State *L) {
   GET_CONNECTION_OBJECT
 
   lua_pushstring(L, PQerrorMessage(c->conn));
+
+  return 1;
+}
+
+int gmpg_set_encoding(lua_State *L) {
+  char encoding_query[128];
+  PGresult *res;
+
+  GET_CONNECTION_OBJECT
+
+  sprintf(encoding_query, "SET CLIENT_ENCODING TO '%s';", lua_check_string(lua_get_base(L), 2));
+
+  res = PQexec(c->conn, encoding_query);
+
+  if (PQresultStatus(res) != PGRES_COMMAND_OK) {
+    printf("pg2 - failed to set encoding!\n(%s)\n", PQerrorMessage(c->conn));
+    lua_pushboolean(L, 0);
+  } else
+    lua_pushboolean(L, 1);
 
   return 1;
 }
