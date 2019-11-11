@@ -19,5 +19,6 @@ int gmpg_gc(lua_State *L);
 int gmpg_connect(lua_State *L);
 int gmpg_disconnect(lua_State *L);
 int gmpg_connected(lua_State *L);
+int gmpg_disconnect(lua_State *L);
 
 #endif

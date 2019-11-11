@@ -14,6 +14,8 @@ LUA_BASELESS_FUNC(gmpg_new_connection) {
 DLL_EXPORT int gmod13_open(lua_State *state) {
   luabase_t *LUA = lua_get_base(state);
 
+  printf("\n");
+
   load_lua_shared();
 
   lua_push_special(LUA, LUA_SPECIAL_GLOB);
