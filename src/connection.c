@@ -78,8 +78,11 @@ int gmpg_connect(lua_State *L) {
     else {
       rows = PQntuples(res);
 
-      if (rows > MAX_PG_TYPES)
-        printf("pg2 - PostgreSQL server appears to have out-of-range types (%i). Report an issue at GitHub!\n", rows);
+      if (rows > MAX_PG_TYPES || rows == 0)
+        if (rows != 0)
+          printf("pg2 - PostgreSQL server appears to have out-of-range types (%i). Report an issue at GitHub!\n", rows);
+        else
+          printf("pg2 - PostgreSQL server appears to have 0 types (version too old?)\n");
       else {
         status = 1;
 
@@ -87,7 +90,7 @@ int gmpg_connect(lua_State *L) {
           if (!PQgetisnull(res, i, 0) && !PQgetisnull(res, i, 1)) {
             row_id = atoi(PQgetvalue(res, i, 0));
 
-            if (row_id > MAX_PG_TYPES) {
+            if (row_id >= MAX_PG_TYPES) {
               printf("pg2 - PostgreSQL server appears to have out-of-range types (%i). Report an issue at GitHub!\n", row_id);
               status = 0;
               break;
