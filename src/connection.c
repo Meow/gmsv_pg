@@ -78,7 +78,7 @@ int gmpg_connect(lua_State *L) {
     else {
       rows = PQntuples(res);
 
-      if (rows > MAX_PG_TYPES || rows == 0)
+      if (rows >= MAX_PG_TYPES || rows == 0)
         if (rows != 0)
           printf("pg2 - PostgreSQL server appears to have out-of-range types (%i). Report an issue at GitHub!\n", rows);
         else
