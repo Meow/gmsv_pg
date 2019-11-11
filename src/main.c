@@ -1,4 +1,5 @@
 #include "connection.h"
+#include "lua_shared.h"
 #include <stdio.h>
 
 #define PG_VERSION "2.0.0"
@@ -16,8 +17,8 @@ LUA_BASELESS_FUNC(gmpg_get_version) {
   return 1;
 }
 
-DLL_EXPORT int gmod13_open(lua_State *state) {
-  luabase_t *LUA = lua_get_base(state);
+DLL_EXPORT int gmod13_open(lua_State *L) {
+  luabase_t *LUA = lua_get_base(L);
 
   printf("\n");
 
@@ -45,6 +46,6 @@ DLL_EXPORT int gmod13_open(lua_State *state) {
   return 0;
 }
 
-GMOD_MODULE_CLOSE() {
+DLL_EXPORT int gmod13_close(lua_State *L) {
   return 0;
 }

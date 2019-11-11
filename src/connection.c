@@ -1,7 +1,14 @@
 #include "connection.h"
 #include "debug.h"
 
-#define GET_CONNECTION_OBJECT gmpg_connection *c; gmpg_connection **__c = (gmpg_connection**)luaL_checkudata(L, 1, "pg_connection"); c = *__c;
+#define GET_CONNECTION_OBJECT gmpg_connection *c;                                                                \
+                              gmpg_connection **__c = (gmpg_connection**)luaL_checkudata(L, 1, "pg_connection"); \
+                              c = *__c;
+#define PG_CHAR_GETTER_FUNC(what) int gmpg_##what(lua_State *L) { \
+  GET_CONNECTION_OBJECT                                           \
+  lua_pushstring(L, PQ##what(c->conn));                           \
+  return 1;                                                       \
+}
 
 int gmpg_connection_push_mt(lua_State *L) {
   if (luaL_newmetatable(L, "pg_connection")) {
@@ -16,6 +23,11 @@ int gmpg_connection_push_mt(lua_State *L) {
       "protocol_version", gmpg_protocol_version,
       "server_version", gmpg_server_version,
       "error_message", gmpg_error_message,
+      "db", gmpg_db,
+      "user", gmpg_user,
+      "pass", gmpg_pass,
+      "host", gmpg_host,
+      "port", gmpg_port,
       NULL, NULL
     };
 
@@ -24,6 +36,12 @@ int gmpg_connection_push_mt(lua_State *L) {
 
   return 0;
 }
+
+PG_CHAR_GETTER_FUNC(db)
+PG_CHAR_GETTER_FUNC(user)
+PG_CHAR_GETTER_FUNC(pass)
+PG_CHAR_GETTER_FUNC(host)
+PG_CHAR_GETTER_FUNC(port)
 
 void perform_disconnect(gmpg_connection *c) {
   if (c->conn != NULL) {

@@ -22,5 +22,10 @@ int gmpg_connected(lua_State *L);
 int gmpg_protocol_version(lua_State *L);
 int gmpg_server_version(lua_State *L);
 int gmpg_error_message(lua_State *L);
+int gmpg_db(lua_State *L);
+int gmpg_user(lua_State *L);
+int gmpg_pass(lua_State *L);
+int gmpg_host(lua_State *L);
+int gmpg_port(lua_State *L);
 
 #endif
