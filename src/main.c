@@ -11,6 +11,11 @@ LUA_BASELESS_FUNC(gmpg_new_connection) {
   return gmpg_new(L);
 }
 
+LUA_BASELESS_FUNC(gmpg_get_version) {
+  lua_pushnumber(L, PQlibVersion());
+  return 1;
+}
+
 DLL_EXPORT int gmod13_open(lua_State *state) {
   luabase_t *LUA = lua_get_base(state);
 
@@ -22,6 +27,8 @@ DLL_EXPORT int gmod13_open(lua_State *state) {
   lua_create_table(LUA);
   lua_push_cfunc(LUA, gmpg_new_connection);
   lua_set_field(LUA, -2, "new_connection");
+  lua_push_cfunc(LUA, gmpg_get_version);
+  lua_set_field(LUA, -2, "libpq_version");
   lua_push_string(LUA, PG_VERSION, 0);
   lua_set_field(LUA, -2, "version");
   lua_push_string(LUA, PG_VERSION_MAJOR, 0);

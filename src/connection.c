@@ -13,6 +13,9 @@ int gmpg_connection_push_mt(lua_State *L) {
       "connect", gmpg_connect,
       "disconnect", gmpg_disconnect,
       "connected", gmpg_connected,
+      "protocol_version", gmpg_protocol_version,
+      "server_version", gmpg_server_version,
+      "error_message", gmpg_error_message,
       NULL, NULL
     };
 
@@ -134,4 +137,28 @@ int gmpg_disconnect(lua_State *L) {
   perform_disconnect(c);
 
   return 0;
+}
+
+int gmpg_protocol_version(lua_State *L) {
+  GET_CONNECTION_OBJECT
+
+  lua_pushnumber(L, PQprotocolVersion(c->conn));
+
+  return 1;
+}
+
+int gmpg_server_version(lua_State *L) {
+  GET_CONNECTION_OBJECT
+
+  lua_pushnumber(L, PQserverVersion(c->conn));
+
+  return 1;
+}
+
+int gmpg_error_message(lua_State *L) {
+  GET_CONNECTION_OBJECT
+
+  lua_pushstring(L, PQerrorMessage(c->conn));
+
+  return 1;
 }
