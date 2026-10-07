@@ -94,12 +94,12 @@ A statement that is run often can be given a name with `prepare`, and is run by 
 db:prepare("add_score", "update players set score = score + $2 where steamid = $1")
 
 local query = db:query_prepared("add_score")
-query:run("76561198012345678", 10)
+query:run("76561197988658543", 10)
 ```
 
 The result of a query is a list of its rows, `rows[1]` to `rows[size]`. A row is a table of its values by the names of their columns, as in `rows[1].name`. A column that is NULL is not in that table, which makes it nil. Of two columns with the same name only one is in it, the first that is not NULL. Give them names of their own to have both: `select a.name, b.name as other_name`.
 
-In a row, booleans are booleans, numbers are numbers and everything else is a string. Whole numbers beyond 2^53 are strings too, because a Lua number would round them: a 64-bit SteamID from a `bigint` column comes back as `"76561198012345678"`. A `numeric` that is not a whole number has no such way out. With more digits than a Lua number holds, which is about 15, it is rounded, unless the query casts it to `text`.
+In a row, booleans are booleans, numbers are numbers and everything else is a string. Whole numbers beyond 2^53 are strings too, because a Lua number would round them: a 64-bit SteamID from a `bigint` column comes back as `"76561197988658543"`. A `numeric` that is not a whole number has no such way out. With more digits than a Lua number holds, which is about 15, it is rounded, unless the query casts it to `text`.
 
 Next to the rows there is the amount of rows that were affected, the ones that the query inserted, updated or deleted. If the query was several statements, all of this is about the last one.
 
