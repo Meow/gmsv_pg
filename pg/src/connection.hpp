@@ -16,6 +16,36 @@ private:
   std::string _password;
   std::string _port;
   std::shared_ptr<Session> _session = std::make_shared<Session>();
+  // The events of the connection itself come when they like, with no query
+  // around, and its userdata has to be there for them. It is kept for as long
+  // as the session listens: _self stands for it then and is 0 otherwise.
+  std::shared_ptr<LuaEventEmitterManager> _events;
+  LuaEventEmitterManager::kept_t _self = 0;
+
+  // Keeps the userdata at stack position 1 if it is not kept yet. Returns
+  // what takes the events of the session to its listeners.
+  Session::emitter_t hold(ILuaBase *LUA) {
+    if (!_self) {
+      _events = LuaEventEmitterManager::Current(LUA);
+      _self = _events->Keep(LUA, 1);
+    }
+
+    return [events = _events, self = _self](const char *name, std::vector<LuaValue> args) {
+      events->EmitKept(self, name, std::move(args));
+    };
+  }
+
+  // Lets go of the userdata if the session listens to nothing, which is to
+  // be seen to after everything that may have changed that. The events that
+  // are still on their way are not delivered then.
+  void settle(ILuaBase *LUA) {
+    if (!_self || _session->Listening())
+      return;
+
+    _events->Release(LUA, _self);
+    _events.reset();
+    _self = 0;
+  }
 
   // Runs fn, which is something that either works or throws, and tells Lua
   // which one it was: true, or false and the error message.
@@ -49,6 +79,20 @@ private:
     quoted += '\'';
     return quoted;
   }
+
+  // The value of a hex digit, or -1 if it is not one.
+  static int hex_value(char digit) {
+    if (digit >= '0' && digit <= '9')
+      return digit - '0';
+
+    if (digit >= 'a' && digit <= 'f')
+      return digit - 'a' + 10;
+
+    if (digit >= 'A' && digit <= 'F')
+      return digit - 'A' + 10;
+
+    return -1;
+  }
 public:
   std::string name() override { return "#<DatabaseConnection>"; }
 public:
@@ -75,6 +119,8 @@ public:
     AddMethod("is_open", is_open);
     AddMethod("prepare", prepare);
     AddMethod("unprepare", unprepare);
+    AddMethod("listen", listen);
+    AddMethod("unlisten", unlisten);
     AddMethod("set_encoding", set_encoding);
   }
 public:
@@ -104,7 +150,9 @@ public:
     auto database = LuaValue::Pop(LUA, 5);
     auto port     = LuaValue::Pop(LUA, 6);
     auto extra    = LuaValue::Pop(LUA, 7);
-    std::string connection_string = "";
+    // Without a timeout a server that does not answer would stall the main
+    // thread for minutes. This goes first, so that extra can change it.
+    std::string connection_string = "connect_timeout=5 ";
 
     obj->_host = hostname.type() == Type::String ? std::string(hostname) : "127.0.0.1";
     obj->_user = username.type() == Type::String ? std::string(username) : "postgres";
@@ -131,13 +179,17 @@ public:
       connection_string += " port=" + conninfo_value(obj->_port);
 
     // Goes last, because libpq uses the last occurrence of a keyword: what is
-    // in extra overrides the arguments above. A hostaddr in it is the address
+    // in extra overrides everything above. A hostaddr in it is the address
     // that gets connected to, whatever the host is. Unlike the arguments, it
     // is a piece of connection string already and goes in as it is.
     if (extra.type() == Type::String)
       connection_string += " " + std::string(extra);
 
-    return attempt(LUA, [&] { obj->_session->Connect(connection_string); });
+    int results = attempt(LUA, [&] { obj->_session->Connect(connection_string); });
+
+    // The channels stay with the database that was connected to before.
+    obj->settle(LUA);
+    return results;
   }
 
   LUA_METHOD(escape) {
@@ -152,26 +204,56 @@ public:
   }
 
   // The counterpart of unescape: binary data as the text that a bytea takes,
-  // be it as a parameter or, quoted, inside of a query.
+  // be it as a parameter or, quoted, inside of a query. That is its hex
+  // format, the one that servers send unless bytea_output tells them not to.
   LUA_METHOD(escape_bytea) {
-    auto connection = Pop(LUA, 1)->_session->Peek();
+    Pop(LUA, 1)->_session->Peek();
 
     if (!LUA->IsType(2, Type::String))
       return 0;
 
+    static const char digits[] = "0123456789abcdef";
     std::string raw = check_string(LUA, 2, "");
-    push_string(LUA, connection->esc_raw(pqxx::binary_cast(raw)));
+    std::string escaped = "\\x";
+
+    escaped.reserve(2 + raw.size() * 2);
+
+    for (unsigned char byte : raw) {
+      escaped += digits[byte >> 4];
+      escaped += digits[byte & 0x0F];
+    }
+
+    push_string(LUA, escaped);
     return 1;
   }
 
   LUA_METHOD(unescape) {
-    auto connection = Pop(LUA, 1)->_session->Peek();
+    Pop(LUA, 1)->_session->Peek();
 
     if (!LUA->IsType(2, Type::String))
       return 0;
 
-    pqxx::bytes raw = connection->unesc_bin(check_string(LUA, 2, ""));
-    push_string(LUA, std::string_view(reinterpret_cast<const char *>(raw.data()), raw.size()));
+    std::string escaped = check_string(LUA, 2, "");
+    std::string raw;
+
+    if (escaped.size() < 2 || escaped[0] != '\\' || escaped[1] != 'x')
+      throw std::invalid_argument("pg - binary data has to start with \\x");
+
+    if (escaped.size() % 2 != 0)
+      throw std::invalid_argument("pg - binary data is cut off");
+
+    raw.reserve(escaped.size() / 2 - 1);
+
+    for (size_t i = 2; i < escaped.size(); i += 2) {
+      int high = hex_value(escaped[i]), low = hex_value(escaped[i + 1]);
+
+      if (high < 0 || low < 0)
+        throw std::invalid_argument("pg - binary data has something other than hex digits in it");
+
+      raw += (char)(high << 4 | low);
+    }
+
+    push_string(LUA, raw);
     return 1;
   }
 
@@ -224,24 +306,20 @@ public:
   }
 
   LUA_METHOD(protocol_version) {
-    LUA->PushNumber(Pop(LUA, 1)->_session->Peek()->protocol_version());
+    LUA->PushNumber(PQprotocolVersion(Pop(LUA, 1)->_session->Peek()->conn));
     return 1;
   }
 
   LUA_METHOD(server_version) {
-    LUA->PushNumber(Pop(LUA, 1)->_session->Peek()->server_version());
+    LUA->PushNumber(PQserverVersion(Pop(LUA, 1)->_session->Peek()->conn));
     return 1;
   }
 
   LUA_METHOD(cancel) {
-    auto connection = Pop(LUA, 1)->_session->Peek();
+    auto obj = Pop(LUA, 1);
+    obj->_session->Peek();
 
-    return attempt(LUA, [&] {
-      if (!connection->is_open())
-        throw std::runtime_error("pg - connection is closed, there is nothing to cancel.");
-
-      connection->cancel_query();
-    });
+    return attempt(LUA, [&] { obj->_session->Cancel(); });
   }
 
   LUA_METHOD(prepare) {
@@ -263,6 +341,35 @@ public:
     return attempt(LUA, [&] {
       obj->_session->Unprepare(check_string(LUA, 2, "pg - prepared query name is invalid"));
     });
+  }
+
+  LUA_METHOD(listen) {
+    auto obj = Pop(LUA, 1);
+    obj->_session->Peek();
+
+    int results = attempt(LUA, [&] {
+      std::string channel = check_string(LUA, 2, "pg - channel name is invalid");
+
+      // Held before the server is asked: a notification may be there before
+      // this returns.
+      obj->_session->Listen(channel, obj->hold(LUA));
+    });
+
+    // Not if that did not work and there is no other channel.
+    obj->settle(LUA);
+    return results;
+  }
+
+  LUA_METHOD(unlisten) {
+    auto obj = Pop(LUA, 1);
+    obj->_session->Peek();
+
+    int results = attempt(LUA, [&] {
+      obj->_session->Unlisten(check_string(LUA, 2, "pg - channel name is invalid"));
+    });
+
+    obj->settle(LUA);
+    return results;
   }
 
   LUA_METHOD(set_encoding) {

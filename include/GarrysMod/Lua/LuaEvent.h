@@ -25,19 +25,36 @@ namespace Lua {
    * Listeners are stored in the metatable of the emitter's userdata rather
    * than referenced from C++, so that a listener that refers to its emitter
    * does not keep it from being garbage collected.
+   *
+   * An emitter has to be around when its events are delivered. Hold is for
+   * the one that is waiting for a last event, Keep for the one that events
+   * are delivered to for as long as it takes.
    */
   class LuaEventEmitterManager
   {
+  public:
+    /**
+     * @brief stands for an emitter that is kept, see Keep. Unlike a reference
+     *  of Lua it is never given out twice. 0 stands for none.
+     */
+    typedef unsigned long long kept_t;
   private:
     struct Event
     {
+      // Reference to the emitter, unless it is a kept one
       int object;
+      kept_t kept;
+      // Whether the reference is freed once the event was delivered
+      bool release;
       std::string name;
       std::vector<LuaValue> args;
     };
 
     std::deque<Event> _events;
     std::mutex _events_mtx;
+    // The references of the emitters that are kept. Main thread only
+    std::map<kept_t, int> _kept;
+    kept_t _last_kept = 0;
     bool _hooked = false;
     bool _closed = false;
 
@@ -51,7 +68,7 @@ namespace Lua {
   public:
     /**
      * @brief keeps the emitter at the supplied stack position from being
-     *  garbage collected until an event was delivered to it. Main thread only.
+     *  garbage collected until its last event was delivered. Main thread only.
      * @param LUA      - Lua interface
      * @param position - lua stack position of the emitter
      * @return reference to the emitter, to be passed to Emit
@@ -63,13 +80,16 @@ namespace Lua {
     }
 
     /**
-     * @brief enqueue event with supplied arguments, releasing the emitter
-     *  once the event was delivered. Can be called from any thread.
-     * @param object - emitter reference returned by Hold
-     * @param name   - event name
-     * @param args   - event args
+     * @brief enqueue event with supplied arguments. Can be called from any
+     *  thread.
+     * @param object  - emitter reference returned by Hold
+     * @param name    - event name
+     * @param args    - event args
+     * @param release - whether this is the last event for the reference, which
+     *  releases the emitter once it was delivered. False for the events that
+     *  come before that one.
      */
-    void Emit(int object, std::string name, std::vector<LuaValue> args = {})
+    void Emit(int object, std::string name, std::vector<LuaValue> args = {}, bool release = true)
     {
       std::lock_guard<std::mutex> lock(_events_mtx);
 
@@ -77,7 +97,90 @@ namespace Lua {
       if (_closed)
         return;
 
-      _events.push_back(Event{ object, std::move(name), std::move(args) });
+      _events.push_back(Event{ object, 0, release, std::move(name), std::move(args) });
+    }
+
+    /**
+     * @brief keeps the emitter at the supplied stack position from being
+     *  garbage collected until Release is called for it, however many events
+     *  are delivered to it meanwhile. Main thread only.
+     * @param LUA      - Lua interface
+     * @param position - lua stack position of the emitter
+     * @return what stands for the emitter, to be passed to EmitKept and Release
+     */
+    kept_t Keep(ILuaBase *LUA, int position)
+    {
+      LUA->Push(position);
+      int reference = LUA->ReferenceCreate();
+
+      try
+      {
+        _kept.emplace(_last_kept + 1, reference);
+      }
+      catch (...)
+      {
+        LUA->ReferenceFree(reference);
+        throw;
+      }
+
+      return ++_last_kept;
+    }
+
+    /**
+     * @brief lets go of an emitter that is kept. Main thread only.
+     *
+     * Events may still be queued for it. They are not delivered: Lua gives
+     * the reference of the emitter to the next one that asks for one, which
+     * is not who these events are for. That is what kept_t is there for.
+     *
+     * @param LUA  - Lua interface
+     * @param kept - what Keep returned
+     */
+    void Release(ILuaBase *LUA, kept_t kept)
+    {
+      auto found = _kept.find(kept);
+
+      if (found == _kept.end())
+        return;
+
+      LUA->ReferenceFree(found->second);
+      _kept.erase(found);
+    }
+
+    /**
+     * @brief enqueue event with supplied arguments for an emitter that is
+     *  kept. Nothing comes of it if the emitter is released before the event
+     *  was delivered. Can be called from any thread.
+     * @param kept - what Keep returned
+     * @param name - event name
+     * @param args - event args
+     */
+    void EmitKept(kept_t kept, std::string name, std::vector<LuaValue> args = {})
+    {
+      std::lock_guard<std::mutex> lock(_events_mtx);
+
+      if (_closed)
+        return;
+
+      _events.push_back(Event{ 0, kept, false, std::move(name), std::move(args) });
+    }
+
+    /**
+     * @brief calls the listeners of the emitter at the supplied stack
+     *  position right away instead of on Think, for what happens on the main
+     *  thread and is over by then. Main thread only.
+     * @param LUA      - Lua interface
+     * @param position - lua stack position of the emitter
+     * @param name     - event name
+     * @param args     - event args
+     */
+    static void Call(ILuaBase *LUA, int position, const std::string &name, const std::vector<LuaValue> &args = {})
+    {
+      int top = LUA->Top();
+
+      LUA->Push(position);
+      callListeners(LUA, name, args);
+      LUA->Pop(LUA->Top() - top);
     }
 
     /**
@@ -174,40 +277,63 @@ namespace Lua {
     {
       int top = LUA->Top();
 
-      LUA->ReferencePush(event.object);
-      LUA->ReferenceFree(event.object);
-
-      if (LUA->GetMetaTable(-1))
+      if (event.kept)
       {
-        int metatable = LUA->Top();
-        int count = pushListeners(LUA, metatable, "listeners", event.name.c_str());
-        int count_once = pushListeners(LUA, metatable, "listeners_once", event.name.c_str());
+        auto found = _kept.find(event.kept);
 
-        // Forget the listeners that only wanted to be called once
-        if (count_once > 0)
-        {
-          LUA->GetField(metatable, "listeners_once");
-            LUA->PushNil();
-            LUA->SetField(-2, event.name.c_str());
-          LUA->Pop();
-        }
+        // Released while the event was waiting
+        if (found == _kept.end())
+          return;
 
-        // The listeners were copied to the stack before the first one is
-        // called, they can add and remove listeners without affecting this
-        for (int i = 1; i <= count + count_once; i++)
-        {
-          LUA->Push(metatable + i);
+        LUA->ReferencePush(found->second);
+      }
+      else
+      {
+        LUA->ReferencePush(event.object);
 
-          for (const auto &arg : event.args)
-            arg.Push(LUA);
-
-          // Errors in a listener must not get in the way of the others
-          if (LUA->PCall((int)event.args.size(), 0, 0) != 0)
-            reportError(LUA);
-        }
+        if (event.release)
+          LUA->ReferenceFree(event.object);
       }
 
+      callListeners(LUA, event.name, event.args);
       LUA->Pop(LUA->Top() - top);
+    }
+
+    /**
+     * @brief calls the listeners that the emitter at the top of the stack has
+     *  for the event. Leaves more on the stack than it found there.
+     */
+    static void callListeners(ILuaBase *LUA, const std::string &name, const std::vector<LuaValue> &args)
+    {
+      if (!LUA->GetMetaTable(-1))
+        return;
+
+      int metatable = LUA->Top();
+      int count = pushListeners(LUA, metatable, "listeners", name.c_str());
+      int count_once = pushListeners(LUA, metatable, "listeners_once", name.c_str());
+
+      // Forget the listeners that only wanted to be called once
+      if (count_once > 0)
+      {
+        LUA->GetField(metatable, "listeners_once");
+          LUA->PushNil();
+          LUA->SetField(-2, name.c_str());
+        LUA->Pop();
+      }
+
+      // The listeners were copied to the stack before the first one is
+      // called, they can add and remove listeners without affecting this
+      for (int i = 1; i <= count + count_once; i++)
+      {
+        LUA->Push(metatable + i);
+
+        for (const auto &arg : args)
+          arg.Push(LUA);
+
+        // Errors in a listener must not get in the way of the others
+        if (LUA->PCall((int)args.size(), 0, 0) != 0)
+          reportError(LUA);
+      }
     }
 
     /**
@@ -285,6 +411,9 @@ namespace Lua {
         manager->second->_closed = true;
         manager->second->_events.clear();
       }
+
+      // The references go with the Lua state
+      manager->second->_kept.clear();
 
       managers().erase(manager);
     }

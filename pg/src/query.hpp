@@ -24,20 +24,17 @@ public:
 
   LUA_METHOD(run) {
     auto obj = Pop(LUA, 1);
-    std::string query_string = obj->_query_string;
-    auto params = pop_params(LUA, 2);
+    Statement statement;
+
+    statement.text = obj->_query_string;
+    statement.params = pop_params(LUA, 2);
 
     // Without parameters the query goes out the plain way, the one that takes
     // several statements at once.
-    if (params->size() == 0) {
-      return run_statement(LUA, *obj->_session, obj->_sync, [query_string](pqxx::work &work) {
-        return work.exec(query_string);
-      });
-    }
+    if (!statement.params.empty())
+      statement.kind = Statement::Parameterised;
 
-    return run_statement(LUA, *obj->_session, obj->_sync, [query_string, params](pqxx::work &work) {
-      return work.exec(query_string, *params);
-    });
+    return run_statement(LUA, *obj->_session, obj->_sync, std::move(statement));
   }
 
   LUA_METHOD(set_sync) {

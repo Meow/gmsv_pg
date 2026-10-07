@@ -22,50 +22,32 @@ ARG OPENSSL_VERSION=3.5.9
 ARG OPENSSL_SHA256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
 ARG POSTGRES_VERSION=18.6
 ARG POSTGRES_SHA256=555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f
-ARG LIBPQXX_VERSION=8.0.2
-ARG LIBPQXX_SHA256=028c5fba4982e759fe182af1103ccd08b02bb4e1f9f12a551e01d21cac0c4440
-RUN mkdir -p /deps/src/openssl /deps/src/postgresql /deps/src/libpqxx \
+RUN mkdir -p /deps/src/openssl /deps/src/postgresql \
  && cd /tmp \
  && curl -fsSL -o openssl.tar.gz \
       "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
  && curl -fsSL -o postgresql.tar.bz2 \
       "https://ftp.postgresql.org/pub/source/v${POSTGRES_VERSION}/postgresql-${POSTGRES_VERSION}.tar.bz2" \
- && curl -fsSL -o libpqxx.tar.gz \
-      "https://github.com/jtv/libpqxx/archive/refs/tags/${LIBPQXX_VERSION}.tar.gz" \
  && printf '%s  %s\n' \
       "${OPENSSL_SHA256}" openssl.tar.gz \
       "${POSTGRES_SHA256}" postgresql.tar.bz2 \
-      "${LIBPQXX_SHA256}" libpqxx.tar.gz \
     | sha256sum -c - \
  && tar -xzf openssl.tar.gz -C /deps/src/openssl --strip-components=1 \
  && tar -xjf postgresql.tar.bz2 -C /deps/src/postgresql --strip-components=1 \
- && tar -xzf libpqxx.tar.gz -C /deps/src/libpqxx --strip-components=1 \
- && rm openssl.tar.gz postgresql.tar.bz2 libpqxx.tar.gz
+ && rm openssl.tar.gz postgresql.tar.bz2
 
 # Linux, native toolchain with multilib for x86.
 #
 # A binary only loads where glibc is at least as new as the one it was built
 # against. That is why the Linux targets are built on an older distribution
 # than the Windows ones: Ubuntu 22.04 has glibc 2.35, which makes the module
-# work there, on Debian 12 and on everything newer. libpqxx needs a newer
-# compiler than Ubuntu 22.04 has, GCC 14 comes from the Ubuntu Toolchain PPA.
-# The /usr/include/asm link is what the gcc-multilib package would add: the
-# kernel headers for x86.
+# work there, on Debian 12 and on everything newer. Its own compiler, GCC 11,
+# is new enough for the C++17 that the module is written in.
 FROM ubuntu:22.04 AS toolchain-linux
 
-ARG TOOLCHAIN_PPA_KEY=60C317803A41BA51845E371A1E9377A2BA9EF27F
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg make perl bison flex \
- && curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x${TOOLCHAIN_PPA_KEY}" \
-    | gpg --dearmor -o /usr/share/keyrings/toolchain-ppa.gpg \
- && echo "deb [signed-by=/usr/share/keyrings/toolchain-ppa.gpg] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu jammy main" \
-      > /etc/apt/sources.list.d/toolchain-ppa.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends gcc-14-multilib g++-14-multilib \
- && ln -s gcc-14 /usr/bin/gcc \
- && ln -s g++-14 /usr/bin/g++ \
- && ln -s x86_64-linux-gnu/asm /usr/include/asm \
+      make perl bison flex gcc-multilib g++-multilib \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=sources /usr/local/bin/premake5 /usr/local/bin/premake5
@@ -173,7 +155,6 @@ RUN set -- \
       'gloo' /licenses/LICENSE_GLOO.md \
       'OpenSSL' /deps/src/openssl/LICENSE.txt \
       'libpq, a part of PostgreSQL' /deps/src/postgresql/COPYRIGHT \
-      'libpqxx' /deps/src/libpqxx/COPYING \
       'MinGW-w64 runtime, in the Windows binaries only' /usr/share/doc/mingw-w64-common/copyright \
  && rule=$(printf '%78s' '' | tr ' ' '=') \
  && { \

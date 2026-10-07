@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds static OpenSSL, libpq and libpqxx for one target and installs them to
+# Builds static OpenSSL and libpq for one target and installs them to
 # /deps/<target>. Expects the unpacked sources in /deps/src, see the Dockerfile.
 set -eu
 
@@ -12,22 +12,22 @@ case $target in
   linux-x86)
     host=i686-linux-gnu
     openssl_target=linux-x86
-    cc='gcc -m32' cxx='g++ -m32' cross=
+    cc='gcc -m32' cross=
     ;;
   linux-x86_64)
     host=x86_64-linux-gnu
     openssl_target=linux-x86_64
-    cc='gcc' cxx='g++' cross=
+    cc='gcc' cross=
     ;;
   windows-x86)
     host=i686-w64-mingw32
     openssl_target=mingw
-    cc=$host-gcc cxx=$host-g++ cross=$host-
+    cc=$host-gcc cross=$host-
     ;;
   windows-x86_64)
     host=x86_64-w64-mingw32
     openssl_target=mingw64
-    cc=$host-gcc cxx=$host-g++ cross=$host-
+    cc=$host-gcc cross=$host-
     ;;
   *)
     echo "unknown target: $target" >&2
@@ -99,20 +99,6 @@ cp src/common/libpgcommon_shlib.a src/port/libpgport_shlib.a "$prefix/lib/"
 cp src/interfaces/libpq/libpq-fe.h src/interfaces/libpq/libpq-events.h \
   src/include/postgres_ext.h "$prefix/include/"
 
-# libpqxx. Its configure wants to link a program against libpq, which takes
-# more than -lpq when libpq is static. Only a static library is built here, so
-# nothing gets linked for real, and the check is answered up front instead.
-cd "$work/libpqxx"
-./configure --build="$build" --host="$host" --prefix="$prefix" \
-  --disable-shared --enable-static --disable-documentation \
-  --with-postgres-include="$prefix/include" --with-postgres-lib="$prefix/lib" \
-  CXX="$cxx" CXXFLAGS="-std=c++20 $flags" ac_cv_lib_pq_PQexec=yes
-# Just the library, the examples are of no use here.
-make -j"$jobs" src/libpqxx.la
-make install-libLTLIBRARIES
-make -C include install
-
 cd /
-rm -rf "$work" "$prefix/share" "$prefix/lib/pkgconfig" "$prefix/lib/cmake" \
-  "$prefix"/lib/*.la
+rm -rf "$work" "$prefix/share" "$prefix/lib/pkgconfig" "$prefix/lib/cmake"
 ls -l "$prefix/lib"

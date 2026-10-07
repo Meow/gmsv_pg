@@ -62,8 +62,7 @@ workspace 'pg'
 project 'pg'
   kind 'SharedLib'
   language 'C++'
-  -- libpqxx needs C++20.
-  cppdialect 'C++20'
+  cppdialect 'C++17'
   location './project'
   targetdir './bin'
   includedirs { '../include' }
@@ -80,7 +79,7 @@ project 'pg'
   }
 
   -- The order matters, a library has to come before the ones it depends on.
-  links { 'pqxx', 'pq', 'pgcommon_shlib', 'pgport_shlib', 'ssl', 'crypto' }
+  links { 'pq', 'pgcommon_shlib', 'pgport_shlib', 'ssl', 'crypto' }
 
   if is_windows then
     links { 'ws2_32', 'secur32', 'shell32', 'crypt32', 'gdi32', 'advapi32', 'user32' }

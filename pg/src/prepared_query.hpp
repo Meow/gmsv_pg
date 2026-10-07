@@ -24,12 +24,13 @@ public:
 
   LUA_METHOD(run) {
     auto obj = Pop(LUA, 1);
-    std::string name = obj->_query_string;
-    auto params = pop_params(LUA, 2);
+    Statement statement;
 
-    return run_statement(LUA, *obj->_session, obj->_sync, [name, params](pqxx::work &work) {
-      return work.exec(pqxx::prepped{name}, *params);
-    });
+    statement.kind = Statement::Prepared;
+    statement.text = obj->_query_string;
+    statement.params = pop_params(LUA, 2);
+
+    return run_statement(LUA, *obj->_session, obj->_sync, std::move(statement));
   }
 
   LUA_METHOD(set_sync) {
