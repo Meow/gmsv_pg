@@ -161,6 +161,30 @@ RUN for f in /out/*_linux*.dll; do \
       [ "$(printf '%s\n' "GLIBC_${GLIBC_VERSION}" "$needs" | sort -V | tail -n 1)" = "GLIBC_${GLIBC_VERSION}" ] || exit 1; \
     done
 
+# The licenses of what is linked into the binaries ask for their notices to be
+# distributed along with them. They are taken from the sources that were built
+# rather than kept as copies that would go stale. The MinGW-w64 runtime has no
+# sources here, the copyright file of its Debian package is what carries its
+# notices. libstdc++ and libgcc need none: the GCC Runtime Library Exception
+# lets them be distributed as a part of the binaries under any terms.
+COPY LICENSE.md LICENSE_GLOO.md /licenses/
+RUN set -- \
+      'gmsv_pg' /licenses/LICENSE.md \
+      'gloo' /licenses/LICENSE_GLOO.md \
+      'OpenSSL' /deps/src/openssl/LICENSE.txt \
+      'libpq, a part of PostgreSQL' /deps/src/postgresql/COPYRIGHT \
+      'libpqxx' /deps/src/libpqxx/COPYING \
+      'MinGW-w64 runtime, in the Windows binaries only' /usr/share/doc/mingw-w64-common/copyright \
+ && rule=$(printf '%78s' '' | tr ' ' '=') \
+ && { \
+      printf '%s\n' 'The gmsv_pg binaries contain the software below, each under its own license.'; \
+      while [ $# -gt 0 ]; do \
+        printf '\n\n%s\n%s\n%s\n\n' "$rule" "$1" "$rule"; \
+        cat "$2" || exit 1; \
+        shift 2; \
+      done; \
+    } > /out/LICENSES.txt
+
 # The binaries are not compressed with UPX, unlike in gmsv_file: packed, the
 # x86 Linux module crashes the server when it is loaded.
 FROM scratch

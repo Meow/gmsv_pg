@@ -180,3 +180,7 @@ DatabaseQuery:on("error", function(error) end)
 -- Strings, numbers and booleans are supported, nil is NULL.
 function PreparedQuery:run(...)
 ```
+
+## License
+
+gmsv_pg is under the MIT license, see `LICENSE.md`. The binaries also contain gloo (MIT), libpqxx (BSD 3-Clause), libpq (PostgreSQL License) and OpenSSL (Apache License 2.0), and the Windows ones the MinGW-w64 runtime (mostly Zope Public License 2.1). `./build.sh` writes the license texts of all of them to `pg/bin/LICENSES.txt`, which has to be distributed together with the binaries.
