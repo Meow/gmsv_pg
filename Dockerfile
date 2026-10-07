@@ -131,7 +131,7 @@ RUN for f in /out/*.dll; do \
       awk -v f="${f##*/}" '/NEEDED|DLL Name:/ { print f ": " $NF }' /tmp/headers; \
     done > /tmp/deps \
  && cat /tmp/deps \
- && ! grep -viE ': (libc\.so\.6|libm\.so\.6|ld-linux(-x86-64)?\.so\.2|(kernel32|msvcrt|advapi32|crypt32|secur32|shell32|user32|ws2_32)\.dll)$' /tmp/deps \
+ && ! grep -viE ': (libc\.so\.6|libm\.so\.6|ld-linux(-x86-64)?\.so\.2|(kernel32|msvcrt|advapi32|crypt32|gdi32|secur32|shell32|user32|ws2_32)\.dll)$' /tmp/deps \
  && rm /tmp/headers /tmp/deps
 
 # Fail if the Linux binaries ask for a newer glibc than the one they are
