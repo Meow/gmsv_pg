@@ -189,16 +189,35 @@ namespace Lua {
      */
     void Think(ILuaBase *LUA)
     {
-      std::deque<Event> events;
+      size_t count;
 
-      // Listeners are free to emit more events, don't keep the queue locked
       {
         std::lock_guard<std::mutex> lock(_events_mtx);
-        events.swap(_events);
+        count = _events.size();
       }
 
-      for (const auto &event : events)
+      // Listeners are free to emit more events: don't keep the queue locked,
+      // and leave what was not there to begin with for the next tick. Events
+      // are taken from the queue one at a time, so that an error that gets
+      // out of here costs the one that was being delivered and not the ones
+      // behind it, which are still there the next time.
+      for (; count > 0; count--)
+      {
+        Event event;
+
+        {
+          std::lock_guard<std::mutex> lock(_events_mtx);
+
+          // A Think that a listener ran got to the rest first
+          if (_events.empty())
+            break;
+
+          event = std::move(_events.front());
+          _events.pop_front();
+        }
+
         dispatch(LUA, event);
+      }
     }
   private:
     void hookThink(ILuaBase *LUA)
@@ -220,7 +239,7 @@ namespace Lua {
         LUA->PushString(_hook_name().c_str());
         LUA->PushCFunction(think);
 
-      if (LUA->PCall(3, 0, 0) != 0)
+      if (LuaPCall(LUA, 3, 0) != 0)
       {
         LUA->Pop(3);
         throw std::runtime_error("unable to listen for events, hook.Add failed");
@@ -330,8 +349,9 @@ namespace Lua {
         for (const auto &arg : args)
           arg.Push(LUA);
 
-        // Errors in a listener must not get in the way of the others
-        if (LUA->PCall((int)args.size(), 0, 0) != 0)
+        // Errors in a listener must not get in the way of the others, and
+        // neither must a listener that left LUA on another state
+        if (LuaPCall(LUA, (int)args.size(), 0) != 0)
           reportError(LUA);
       }
     }
@@ -353,7 +373,7 @@ namespace Lua {
       LUA->Push(-3);
       LUA->PushString("\n");
 
-      if (LUA->PCall(2, 0, 0) != 0)
+      if (LuaPCall(LUA, 2, 0) != 0)
         LUA->Pop();
 
       LUA->Pop(2);
@@ -412,8 +432,10 @@ namespace Lua {
         manager->second->_events.clear();
       }
 
-      // The references go with the Lua state
+      // The references go with the Lua state, and so does the state that
+      // the last function of the module ran on
       manager->second->_kept.clear();
+      LuaState() = nullptr;
 
       managers().erase(manager);
     }

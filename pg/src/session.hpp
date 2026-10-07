@@ -135,6 +135,14 @@ private:
   // The worker does not try to open a lost connection again before this, see
   // idle.
   std::chrono::steady_clock::time_point _retry = std::chrono::steady_clock::time_point::min();
+  // Whatever else needs the connection does not try before this. Until then
+  // it fails right away, with what went wrong the last time, see reopen.
+  std::chrono::steady_clock::time_point _unavailable = std::chrono::steady_clock::time_point::min();
+  std::string _failure;
+  // What the server ending the connection came to, if it did so in the
+  // middle of a transaction and nothing has failed over it yet. The next
+  // statement does, see ready_to_run.
+  std::optional<std::string> _orphaned;
   // Whether the client encoding is UTF8, for escaping.
   std::atomic<bool> _utf8{false};
 
@@ -143,6 +151,8 @@ private:
   std::deque<Job> _queue;
   std::thread _worker;
   bool _finishing = false;
+  // Whether the worker closes the connection when it finishes, see Shutdown.
+  bool _closing = false;
   // Whether there are channels, for the worker and for whoever must not wait
   // for _mtx to find out. Changes with both _mtx and _queue_mtx held.
   std::atomic<bool> _listening{false};
@@ -246,6 +256,18 @@ private:
 
     // From here on they are those of another query.
     void to(std::vector<Notice> &notices) { link->notices = &notices; }
+  };
+
+  // Lets go of a lock for as long as it is around.
+  struct Released {
+    std::unique_lock<std::mutex> &lock;
+
+    explicit Released(std::unique_lock<std::mutex> &lock) : lock(lock) { lock.unlock(); }
+
+    Released(const Released &) = delete;
+    Released &operator=(const Released &) = delete;
+
+    ~Released() { lock.lock(); }
   };
 
   // Locks _mtx, after those who asked for it before. A mutex makes no such
@@ -355,6 +377,7 @@ private:
 
     note_encoding(conn);
     _deactivated = false;
+    _unavailable = std::chrono::steady_clock::time_point::min();
 
     std::lock_guard<std::mutex> lock(_connection_mtx);
     _connection.swap(link);
@@ -364,8 +387,30 @@ private:
   // Replaces a connection that is gone. Whatever was sent to the channels
   // meanwhile did not get here, which those who listen are told. Call with
   // _mtx held.
+  //
+  // An attempt keeps everything waiting that needs _mtx, for as long as the
+  // server takes to answer or not to, and there may be a queue of statements
+  // that each need the connection, or a main thread that asks for it every
+  // now and then. So one that failed is the answer for a while, see ready:
+  // for as long as it took. A server that is not there at all, which is
+  // what takes long to find out, is then waited for half of the time at
+  // most, and by one statement of a queue instead of by each. And where the
+  // answer was quick to come, from a server that is starting or one that
+  // does not let the user in, asking again costs next to nothing, so next to
+  // nothing is turned away that would have got through.
   void reopen() {
-    open();
+    auto began = std::chrono::steady_clock::now();
+
+    try {
+      open();
+    } catch (const connection_error &e) {
+      auto ended = std::chrono::steady_clock::now();
+
+      _failure = e.what();
+      _unavailable = ended + (ended - began);
+      throw;
+    }
+
     emit("reconnect");
   }
 
@@ -465,20 +510,130 @@ private:
     return lock;
   }
 
+  // Has libpq read what the server sent while nobody was looking, without
+  // waiting for more. Call with _mtx and _use_mtx held.
+  //
+  // libpq only finds out that the server has ended a connection when it
+  // reads from it, the status it has does not change before. The server says
+  // why before it hangs up, and a read may get no further than that, or than
+  // something else that was sent before: over an encrypted connection it
+  // gets one message at a time. So this reads for as long as there is
+  // something, up to the end if the connection has one. Whether there is
+  // something, the socket is asked first. On a connection that nothing has
+  // happened to, which is nearly every time, that one question is all this
+  // costs, and it is answered at once.
+  static void catch_up(PGconn *conn) {
+    int socket = PQsocket(conn);
+
+    while (socket >= 0 && PQsocketPoll(socket, 1, 0, 0) > 0) {
+      if (!PQconsumeInput(conn))
+        break;
+    }
+  }
+
   // The connection, ready for use. libpq does not reconnect by itself, so a
-  // connection that was lost is replaced here. Call with _mtx held.
-  PGconn *ready() {
+  // connection that was lost is replaced here. Call with _mtx held, and
+  // without _use_mtx.
+  //
+  // That includes the one that the server ended while it had nothing to do,
+  // after a restart or a timeout: it is found out here, before anything is
+  // sent into it, and nothing is lost by opening another. Unless it was in a
+  // transaction, see ready_to_run.
+  //
+  // insist is for when the user asks for the connection as such: opening it
+  // is tried even if that has only just failed.
+  PGconn *ready(bool insist = false) {
     if (!_connection)
       throw no_connection();
+
+    if (_connection->is_open()) {
+      PGconn *conn = _connection->conn;
+      bool transaction = PQtransactionStatus(conn) != PQTRANS_IDLE;
+      // What the server said before it went is why.
+      std::vector<Notice> said;
+
+      {
+        std::lock_guard<std::mutex> use(_use_mtx);
+        Noticing noticing(_connection, said);
+
+        catch_up(conn);
+        notifications(conn);
+      }
+
+      if (!_connection->is_open() && transaction) {
+        std::string error;
+
+        for (const Notice &notice : said)
+          error += notice.message + '\n';
+
+        _orphaned = error + message_of(conn);
+      }
+    }
 
     if (!_connection->is_open()) {
       if (_closed)
         throw closed();
 
+      if (!insist && std::chrono::steady_clock::now() < _unavailable)
+        throw connection_error(_failure);
+
       reopen();
     }
 
     return _connection->conn;
+  }
+
+  // The connection, ready for a statement to run on. Call with _mtx held,
+  // and without _use_mtx.
+  //
+  // A connection that the server ended in the middle of a transaction, with
+  // nothing on its way, is not just replaced. The transaction is gone with
+  // it, and the statement that comes next was going to be a part of it: run
+  // on the new connection, it would stand alone, and be there to stay
+  // without the rest. So that statement fails, the way one fails that is
+  // lost on its way, which is how the loss gets known at all. What comes
+  // after it is for those who were told.
+  PGconn *ready_to_run() {
+    PGconn *conn;
+
+    try {
+      conn = ready();
+    } catch (const connection_error &) {
+      // This says as much.
+      _orphaned.reset();
+      throw;
+    }
+
+    if (_orphaned) {
+      connection_error error(*_orphaned);
+
+      _orphaned.reset();
+      throw error;
+    }
+
+    return conn;
+  }
+
+  // The connection for libpq to escape with. lock is the one of escaping.
+  //
+  // One that was lost is as good for that as it was, libpq still has what
+  // the server said about how to escape. Of one that was closed nothing is
+  // left to ask. If that was not for good, it is due to be opened again by
+  // whatever needs it next, which is this then: it waits for _mtx after all,
+  // lock is locked from there on, and the connection is opened the way it is
+  // for a query. Whoever escapes before running the query that would have
+  // opened it is not to be stopped short of that query.
+  std::shared_ptr<Link> escapable(std::unique_lock<std::mutex> &lock) {
+    auto link = Peek();
+
+    if (link->conn)
+      return link;
+
+    if (!lock.owns_lock())
+      lock = turn();
+
+    ready();
+    return _connection;
   }
 
   // Not everything in the numeric category reads as a number, think of money
@@ -511,12 +666,19 @@ private:
     const int columns = PQnfields(res);
     std::vector<LuaValue> names;
     std::vector<char> categories;
+    // Of the columns that have the same name, the first one is what a row
+    // has by that name, and the others are not in it. That goes for every
+    // row, also for one where the first is NULL: the name is not to stand
+    // for one column here and for another there.
+    std::vector<bool> hidden;
+    std::set<std::string_view> taken;
 
     for (int column = 0; column < columns; column++) {
       auto type = _types.find(PQftype(res, column));
 
       names.emplace_back(PQfname(res, column));
       categories.push_back(type != _types.end() ? type->second : '\0');
+      hidden.push_back(!taken.insert(PQfname(res, column)).second);
     }
 
     for (int row = 0, count = PQntuples(res); row < count; row++) {
@@ -524,7 +686,7 @@ private:
 
       for (int column = 0; column < columns; column++) {
         // NULL is nil, which is the same as not being in the table.
-        if (PQgetisnull(res, row, column))
+        if (hidden[column] || PQgetisnull(res, row, column))
           continue;
 
         std::string_view field(PQgetvalue(res, row, column), PQgetlength(res, row, column));
@@ -595,16 +757,16 @@ private:
   // Waits for the server to send more of what the connection is waiting for.
   // use is let go of meanwhile. Returns whether there may be more to read.
   //
-  // piped is for a connection that does not block, which may not have sent
-  // all there is to send yet, see the run that takes jobs. The rest goes out
-  // here, as soon as the server takes it.
-  static bool await(PGconn *conn, std::unique_lock<std::mutex> &use, bool piped = false) {
+  // The connection does not block while a statement runs, so it may not have
+  // sent all there is to send yet, see run. The rest goes out here, as soon
+  // as the server takes it.
+  static bool await(PGconn *conn, std::unique_lock<std::mutex> &use) {
     int socket = PQsocket(conn);
 
     if (socket < 0)
       return false;
 
-    int unsent = piped ? PQflush(conn) : 0;
+    int unsent = PQflush(conn);
 
     if (unsent < 0)
       return false;
@@ -706,8 +868,9 @@ private:
   }
 
   // What the statement comes to in the end. lost is whether the connection
-  // went while it was on its way. Call with _mtx held.
-  QueryResult conclude(PGconn *conn, Outcome &outcome, bool lost) const {
+  // went while it was on its way. Call with _mtx held, and with use, which
+  // is let go of while the rows are gone through.
+  QueryResult conclude(PGconn *conn, Outcome &outcome, bool lost, std::unique_lock<std::mutex> &use) const {
     QueryResult &out = outcome.out;
 
     if (outcome.refused) {
@@ -726,9 +889,16 @@ private:
       out.success = true;
 
       if (outcome.last) {
+        // All of this is in the result and none of it in the connection, so
+        // escaping does not have to wait for it, which for the rows of a
+        // large result is a while. Neither does it for the result to be
+        // freed.
+        Released released(use);
+
         out.size = PQntuples(outcome.last.get());
         out.rows = convert(outcome.last.get());
         out.affected = affected(outcome.last.get());
+        outcome.last.reset();
       }
     }
 
@@ -749,13 +919,31 @@ private:
   // it unless it has a query under way. To libpq a query is not under way yet
   // while it is being sent, and no longer once the first result of one that
   // has parameters was read. Neither is to be cut in on.
+  //
+  // Sending is no time to wait for the server inside of libpq either. That
+  // takes a connection that does not block for the time being. One that
+  // blocks waits in pqSendSome (fe-misc.c) for the server to take what does
+  // not fit the socket, with _use_mtx held: for as long as a server or a
+  // network that has stopped taking data keeps it up, if the statement is a
+  // large one. This way libpq keeps what the socket does not take (pqPutMsgEnd,
+  // which is also what sends once there are 8 kB), and it goes out in await,
+  // which waits for the socket to take more as well as to bring more. To
+  // libpq the query is under way by then, it is once the statement was taken.
+  //
+  // Once the query is over, the rows are gone through with _use_mtx let go
+  // of, see conclude. Whatever the connection is asked is asked before that:
+  // what escaping does to its error message from there on is of no
+  // consequence.
   QueryResult run(PGconn *conn, const Statement &statement) {
     Outcome outcome;
     std::unique_lock<std::mutex> use(_use_mtx);
     // From here on, the notices that arrive are those of this query.
     Noticing noticing(_connection, outcome.out.notices);
 
-    send(conn, statement, outcome);
+    if (PQsetnonblocking(conn, 1) == 0)
+      send(conn, statement, outcome);
+    else
+      outcome.out.error = message_of(conn);
 
     // A plain query may be several statements, each with a result of its own.
     // The last one is what the query returns, the way PQexec has it. An error
@@ -803,11 +991,14 @@ private:
     notifications(conn);
 
     bool lost = PQstatus(conn) != CONNECTION_OK;
-    QueryResult out = conclude(conn, outcome, lost);
+    // One that is not lost may still be in the middle of something that there
+    // was no way out of. The next query gets a new connection. So it does if
+    // the connection does not go back to blocking, which is what everything
+    // else that uses it expects of it.
+    bool stuck = !lost && (PQtransactionStatus(conn) == PQTRANS_ACTIVE || PQsetnonblocking(conn, 0) != 0);
+    QueryResult out = conclude(conn, outcome, lost, use);
 
-    if (!lost && PQtransactionStatus(conn) == PQTRANS_ACTIVE) {
-      // Still in the middle of something that there was no way out of. The
-      // next query gets a new connection.
+    if (stuck) {
       use.unlock();
       drop();
     }
@@ -897,19 +1088,21 @@ private:
   // the first one was taken, and the server says nothing in between.
   //
   // _use_mtx is held as in the other run, and nothing waits for the server
-  // inside of libpq here either. That takes a connection that does not block
-  // for the time being. One that blocks waits in pqSendSome (fe-misc.c) for
-  // the server to take what does not fit the socket, with _use_mtx held and
-  // for as long as the server is busy with a statement that was sent before.
-  // This way libpq keeps what the socket does not take (pqPutMsgEnd, which
-  // is also what sends once there are 8 kB), and it goes out in await, which
-  // waits for the socket to take more as well as to bring more. So the server
-  // never waits for results to be read while nothing reads them, however much
-  // is sent and however much comes back.
+  // inside of libpq here either, on a connection that does not block for the
+  // time being. Here that is more than a matter of what is held meanwhile.
+  // One that blocks waits in pqSendSome (fe-misc.c) for the server to take
+  // what does not fit the socket, for as long as the server is busy with a
+  // statement that was sent before. As it is, what the socket does not take
+  // goes out in await, which waits for the socket to take more as well as to
+  // bring more. So the server never waits for results to be read while
+  // nothing reads them, however much is sent and however much comes back.
   //
   // To libpq a command is under way from the first statement that it took to
   // the last sync point that was taken from it (cmd_queue_head in fe-exec.c),
   // so escaping leaves the error message of the connection alone all the way.
+  // That includes the times that _use_mtx is let go of for the rows of a
+  // statement, see conclude. After the last statement nothing is asked of
+  // the connection that its error message matters for.
   //
   // A connection that is lost takes along every statement that has no result
   // yet. None of them is sent once more: there is no telling which of them
@@ -931,7 +1124,7 @@ private:
           if (job >= outcomes.size())
             throw std::bad_alloc();
 
-          result = conclude(conn, outcomes[job], lost);
+          result = conclude(conn, outcomes[job], lost, use);
         } catch (const std::exception &e) {
           result = QueryResult();
           result.error = e.what();
@@ -973,7 +1166,7 @@ private:
 
         for (;;) {
           while (intact && PQisBusy(conn))
-            intact = await(conn, use, true);
+            intact = await(conn, use);
 
           // libpq has said why in the error message of the connection. Asked
           // for a result now, it would try to read once more and add to that.
@@ -1071,6 +1264,7 @@ private:
 
     if (_connection->is_open()) {
       PGconn *conn = _connection->conn;
+      bool transaction = PQtransactionStatus(conn) != PQTRANS_IDLE;
       // Inside of libpq, like a query, see run. This does not wait for the
       // server.
       std::lock_guard<std::mutex> use(_use_mtx);
@@ -1082,6 +1276,10 @@ private:
 
       if (alive)
         return;
+
+      // As in ready.
+      if (transaction)
+        _orphaned = message_of(conn);
     }
 
     // One that was closed is not lost. And a server that is away may be so
@@ -1093,7 +1291,7 @@ private:
     try {
       reopen();
     } catch (const std::exception &) {
-      // The query that needs the connection next tries again and says why.
+      // The query that needs the connection next says why.
     }
 
     _retry = std::chrono::steady_clock::now() + RETRY_INTERVAL;
@@ -1119,7 +1317,7 @@ private:
     // statement comes to, the way it would have alone, and the ones behind it
     // are left for another attempt.
     try {
-      conn = ready();
+      conn = ready_to_run();
 
       if (count == 1)
         result = run(conn, jobs.front().statement);
@@ -1153,7 +1351,39 @@ private:
     job.done(std::move(result));
   }
 
+  // Closes the connection for good, the way Disconnect does.
+  void close() {
+    auto lock = turn();
+
+    if (_connection) {
+      _closed = true;
+      drop();
+    }
+  }
+
+  // Has the worker stop once it has run what is queued, and with closing,
+  // close the connection as the last thing it does. This does not wait for
+  // it, see join.
+  void dismiss(bool closing) {
+    {
+      std::lock_guard<std::mutex> lock(_queue_mtx);
+      _finishing = true;
+      _closing = closing;
+    }
+
+    _queue_cv.notify_all();
+  }
+
+  // Waits for a worker that was dismissed. Main thread only.
+  void join() {
+    _worker.join();
+    _finishing = false;
+    _closing = false;
+  }
+
   void work() {
+    bool closing = false;
+
     for (;;) {
       // What was taken off the queue, in its order.
       std::deque<Job> jobs;
@@ -1181,8 +1411,10 @@ private:
         }
 
         // Queries that were queued before Finish still get to run.
-        if (_queue.empty())
-          return;
+        if (_queue.empty()) {
+          closing = _closing;
+          break;
+        }
 
         // The first one, and the ones behind it for as long as they are of
         // a kind that goes to the server together. Whether they do is for
@@ -1207,6 +1439,14 @@ private:
         if (jobs.size() == left)
           jobs.pop_front();
       }
+    }
+
+    if (!closing)
+      return;
+
+    try {
+      close();
+    } catch (...) {
     }
   }
 public:
@@ -1242,6 +1482,7 @@ public:
 
     _closed = false;
     _emit = nullptr;
+    _orphaned.reset();
     note_channels();
   }
 
@@ -1263,7 +1504,7 @@ public:
       throw no_connection();
 
     _closed = false;
-    ready();
+    ready(true);
   }
 
   // Closes the connection until something needs it again.
@@ -1296,11 +1537,18 @@ public:
 
   void Unprepare(const std::string &name) {
     auto lock = turn();
+
+    // Off the record first: whatever the server makes of it, and even if it
+    // cannot be asked, the statement is not to come back with the next
+    // connection.
+    bool known = _prepared.erase(name) > 0;
+    auto before = _connection;
     PGconn *conn = ready();
 
-    // Off the record first: whether the server still knew the statement or
-    // not, it is not to come back with the next connection.
-    _prepared.erase(name);
+    // A connection that had to be opened for this never got the statement,
+    // which is all that was asked for.
+    if (known && _connection != before)
+      return;
 
     std::string query = "DEALLOCATE " + quoted_name(conn, name);
     result_t res(PQexec(conn, query.c_str()));
@@ -1371,11 +1619,7 @@ public:
 
   std::string Escape(const std::string &text) {
     auto lock = escaping(text);
-    auto link = Peek();
-
-    if (!link->conn)
-      throw closed();
-
+    auto link = escapable(lock);
     std::lock_guard<std::mutex> use(_use_mtx);
     std::string escaped(text.size() * 2 + 1, '\0');
     int error = 0;
@@ -1396,14 +1640,9 @@ public:
 
   std::string QuoteName(const std::string &text) {
     auto lock = escaping(text);
-    auto link = Peek();
 
-    if (lock.owns_lock()) {
-      if (!link->conn)
-        throw closed();
-
-      return quoted_name(link->conn, text);
-    }
+    if (lock.owns_lock())
+      return quoted_name(escapable(lock)->conn, text);
 
     // libpq clears the error message of the connection for this one, whatever
     // the text is, so it only gets the text that waited for the running query.
@@ -1466,7 +1705,7 @@ public:
     auto lock = turn();
 
     try {
-      result = run(ready(), statement);
+      result = run(ready_to_run(), statement);
     } catch (const connection_error &e) {
       result.error = e.what();
       result.details.emplace("connection_lost", true);
@@ -1500,28 +1739,32 @@ public:
     if (!_worker.joinable())
       return;
 
-    {
-      std::lock_guard<std::mutex> lock(_queue_mtx);
-      _finishing = true;
-    }
-
-    _queue_cv.notify_all();
-    _worker.join();
-    _finishing = false;
+    dismiss(false);
+    join();
   }
 
   // For when the module is closed: no thread may be left running its code,
-  // and the queries that are still queued should not be lost.
+  // and the queries that are still queued should not be lost. Every
+  // connection is closed.
+  //
+  // A queued query may be waiting for a lock that a transaction of another
+  // session holds, one that was left open because the listener that was
+  // going to end it is no longer called. Nothing but the end of that other
+  // connection lets it go on. So no session is waited for before all of them
+  // were told, and each connection is closed as soon as there is nothing
+  // left to run on it: at once where there is no worker, and by the worker
+  // where there is one, when it is through with the queue.
   static void Shutdown() {
     for (Session *session : sessions()) {
-      session->Finish();
+      if (session->_worker.joinable())
+        session->dismiss(true);
+      else
+        session->close();
+    }
 
-      auto lock = session->turn();
-
-      if (session->_connection) {
-        session->_closed = true;
-        session->drop();
-      }
+    for (Session *session : sessions()) {
+      if (session->_worker.joinable())
+        session->join();
     }
   }
 };

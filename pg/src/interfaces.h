@@ -57,4 +57,17 @@ inline std::string check_string(GarrysMod::Lua::ILuaBase *LUA, int position, con
   return std::string(value, length);
 }
 
+// The same for a string that goes to the server as text. Text goes there
+// zero terminated: what is behind a zero byte would be cut off without a
+// word, be it the rest of a name or the WHERE of a query. what is how the
+// error calls the string.
+inline std::string check_text(GarrysMod::Lua::ILuaBase *LUA, int position, const char *error, const char *what) {
+  std::string value = check_string(LUA, position, error);
+
+  if (value.find('\0') != std::string::npos)
+    throw std::invalid_argument("pg - " + std::string(what) + " contains a zero byte");
+
+  return value;
+}
+
 #endif

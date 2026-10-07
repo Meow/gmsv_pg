@@ -28,6 +28,17 @@ namespace GarrysMod {
 namespace Lua {
 
   /**
+   * @brief the state that the function of the module that is running was
+   *  called on, which is the one that LUA is set to. It says nothing while
+   *  no such function is running. Main thread only.
+   */
+  inline lua_State *&LuaState()
+  {
+    static lua_State *state = nullptr;
+    return state;
+  }
+
+  /**
    * @brief calls fn and turns any C++ exception it throws into a Lua error
    *
    * Lua raises errors by jumping out of the function, which is not guaranteed
@@ -41,6 +52,7 @@ namespace Lua {
   inline int LuaProtect(lua_State *L, int (*fn)(ILuaBase *))
   {
     ILuaBase *LUA = L->luabase;
+    LuaState() = L;
     LUA->SetState(L);
 
     // Nothing that needs a destructor may be alive when the error is raised
@@ -57,6 +69,38 @@ namespace Lua {
 
     LUA->ThrowError(message);
     return 0;
+  }
+
+  /**
+   * @brief PCall for a function of the module that carries on afterwards
+   *
+   * What is called may call a function of the module from a coroutine, which
+   * sets LUA to the state of that coroutine. Garry's Mod has been seen to set
+   * it back when the call returns, but nothing says that it has to. Without
+   * that the caller would carry on with the stack of the coroutine, or with
+   * what is left of one that was collected. So LUA is set back here, to the
+   * state that the caller was called on.
+   *
+   * @param LUA        - Lua interface
+   * @param args       - number of arguments on the stack
+   * @param results    - number of results to leave there
+   * @param error_func - lua stack position of the error handler, 0 for none
+   * @return what PCall returned, which is 0 if there was no error
+   */
+  inline int LuaPCall(ILuaBase *LUA, int args, int results, int error_func = 0)
+  {
+    lua_State *L = LuaState();
+    int status = LUA->PCall(args, results, error_func);
+
+    // There is none outside of the functions of the module, as when it is
+    // opened
+    if (L != nullptr)
+    {
+      LuaState() = L;
+      LUA->SetState(L);
+    }
+
+    return status;
   }
 
   template<class TChildObject>
@@ -203,7 +247,8 @@ namespace Lua {
       if (getter == nullptr)
         return 0;
 
-      // Call getter with the arguments of __index
+      // Call getter with the arguments of __index. It is a function of the
+      // module that runs on this state, LUA is where it was afterwards
       LUA->PushCFunction(getter);
       LUA->Push(1);
       LUA->Push(2);

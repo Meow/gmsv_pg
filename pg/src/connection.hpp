@@ -80,6 +80,15 @@ private:
     return quoted;
   }
 
+  // The string at the stack position, or nothing if what is there is not
+  // one.
+  static std::optional<std::string> string_at(ILuaBase *LUA, int position) {
+    if (!LUA->IsType(position, Type::String))
+      return std::nullopt;
+
+    return check_string(LUA, position, "");
+  }
+
   // The value of a hex digit, or -1 if it is not one.
   static int hex_value(char digit) {
     if (digit >= '0' && digit <= '9')
@@ -132,47 +141,58 @@ public:
     auto obj = Pop(LUA, 1);
     obj->_session->Peek();
 
-    return DatabaseQuery::Make(obj->_session, check_string(LUA, 2, "pg - query string is invalid"))->Push(LUA);
+    return DatabaseQuery::Make(obj->_session, check_text(LUA, 2, "pg - query string is invalid", "query string"))->Push(LUA);
   }
 
   LUA_METHOD(query_prepared) {
     auto obj = Pop(LUA, 1);
     obj->_session->Peek();
 
-    return PreparedQuery::Make(obj->_session, check_string(LUA, 2, "pg - prepared query name is invalid"))->Push(LUA);
+    std::string name = check_text(LUA, 2, "pg - prepared query name is invalid", "prepared query name");
+
+    // The statement without a name is the one that a query with parameters
+    // leaves behind: this would run whichever one came last. prepare does
+    // not take the name either.
+    if (name.empty())
+      throw std::invalid_argument("pg - prepared query name is empty");
+
+    return PreparedQuery::Make(obj->_session, std::move(name))->Push(LUA);
   }
 
   LUA_METHOD(connect) {
     auto obj      = Pop(LUA, 1);
-    auto hostname = LuaValue::Pop(LUA, 2);
-    auto username = LuaValue::Pop(LUA, 3);
-    auto password = LuaValue::Pop(LUA, 4);
-    auto database = LuaValue::Pop(LUA, 5);
-    auto port     = LuaValue::Pop(LUA, 6);
-    auto extra    = LuaValue::Pop(LUA, 7);
+    // Strings are read as strings and nothing else is read at all: a table is
+    // no more than something that is not a string here, whatever is in it.
+    auto hostname = string_at(LUA, 2);
+    auto username = string_at(LUA, 3);
+    auto password = string_at(LUA, 4);
+    auto database = string_at(LUA, 5);
+    auto port     = string_at(LUA, 6);
+    auto extra    = string_at(LUA, 7);
     // Without a timeout a server that does not answer would stall the main
     // thread for minutes. This goes first, so that extra can change it.
     std::string connection_string = "connect_timeout=5 ";
 
-    obj->_host = hostname.type() == Type::String ? std::string(hostname) : "127.0.0.1";
-    obj->_user = username.type() == Type::String ? std::string(username) : "postgres";
-    obj->_password = password.type() == Type::String ? std::string(password) : "";
-    obj->_database = database.type() == Type::String ? std::string(database) : "";
+    obj->_host = hostname.value_or("127.0.0.1");
+    obj->_user = username.value_or("postgres");
+    obj->_password = password.value_or("");
+    obj->_database = database.value_or("");
 
-    if (port.type() == Type::String)
-      obj->_port = std::string(port);
-    else if (port.type() == Type::Number)
-      obj->_port = std::to_string((int)port);
+    // A number goes in the way it would be written, a whole one as the port
+    // it is and every other one, NaN and infinity included, as something
+    // that is none: what is not a port is for libpq to turn down.
+    if (LUA->IsType(6, Type::Number))
+      obj->_port = number_param(LUA->GetNumber(6));
     else
-      obj->_port = "";
+      obj->_port = port.value_or("");
 
     connection_string += "host=" + conninfo_value(obj->_host);
     connection_string += " user=" + conninfo_value(obj->_user);
 
-    if (password.type() == Type::String)
+    if (password)
       connection_string += " password=" + conninfo_value(obj->_password);
 
-    if (database.type() == Type::String)
+    if (database)
       connection_string += " dbname=" + conninfo_value(obj->_database);
 
     if (!obj->_port.empty())
@@ -182,10 +202,17 @@ public:
     // in extra overrides everything above. A hostaddr in it is the address
     // that gets connected to, whatever the host is. Unlike the arguments, it
     // is a piece of connection string already and goes in as it is.
-    if (extra.type() == Type::String)
-      connection_string += " " + std::string(extra);
+    if (extra)
+      connection_string += " " + *extra;
 
-    int results = attempt(LUA, [&] { obj->_session->Connect(connection_string); });
+    int results = attempt(LUA, [&] {
+      // The connection string ends at the first zero byte, and with it
+      // whatever was to come after the argument that has one.
+      if (connection_string.find('\0') != std::string::npos)
+        throw std::invalid_argument("pg - connection parameters contain a zero byte");
+
+      obj->_session->Connect(connection_string);
+    });
 
     // The channels stay with the database that was connected to before.
     obj->settle(LUA);
@@ -199,7 +226,7 @@ public:
     if (!LUA->IsType(2, Type::String))
       return 0;
 
-    push_string(LUA, obj->_session->Escape(check_string(LUA, 2, "")));
+    push_string(LUA, obj->_session->Escape(check_text(LUA, 2, "", "string")));
     return 1;
   }
 
@@ -264,7 +291,7 @@ public:
     if (!LUA->IsType(2, Type::String))
       return 0;
 
-    push_string(LUA, obj->_session->Quote(check_string(LUA, 2, "")));
+    push_string(LUA, obj->_session->Quote(check_text(LUA, 2, "", "string")));
     return 1;
   }
 
@@ -275,7 +302,7 @@ public:
     if (!LUA->IsType(2, Type::String))
       return 0;
 
-    push_string(LUA, obj->_session->QuoteName(check_string(LUA, 2, "")));
+    push_string(LUA, obj->_session->QuoteName(check_text(LUA, 2, "", "name")));
     return 1;
   }
 
@@ -327,8 +354,8 @@ public:
     obj->_session->Peek();
 
     return attempt(LUA, [&] {
-      std::string name = check_string(LUA, 2, "pg - prepared query name is invalid");
-      std::string definition = check_string(LUA, 3, "pg - prepared query definition is invalid");
+      std::string name = check_text(LUA, 2, "pg - prepared query name is invalid", "prepared query name");
+      std::string definition = check_text(LUA, 3, "pg - prepared query definition is invalid", "prepared query definition");
 
       obj->_session->Prepare(name, definition);
     });
@@ -339,7 +366,7 @@ public:
     obj->_session->Peek();
 
     return attempt(LUA, [&] {
-      obj->_session->Unprepare(check_string(LUA, 2, "pg - prepared query name is invalid"));
+      obj->_session->Unprepare(check_text(LUA, 2, "pg - prepared query name is invalid", "prepared query name"));
     });
   }
 
@@ -377,7 +404,7 @@ public:
     obj->_session->Peek();
 
     return attempt(LUA, [&] {
-      obj->_session->SetEncoding(check_string(LUA, 2, "invalid encoding"));
+      obj->_session->SetEncoding(check_text(LUA, 2, "invalid encoding", "encoding"));
     });
   }
 

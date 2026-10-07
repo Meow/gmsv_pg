@@ -63,7 +63,7 @@ query:run(100)
 
 `pg.new_connection` returns a connection that is not connected to anything yet. Before the first `connect` that works, every other method of it throws the Lua error "pg - no connection, connect to a database first.", `is_open` included. Only the methods that add and remove listeners do not.
 
-From then on, a Lua error is thrown for what the module cannot work with: a query string or the name of an event that is not a string, a listener that is not a function, a parameter that is neither a string, a number, a boolean nor nil, text for `escape`, `quote` or `quote_name` that is not valid in the encoding of the connection, a method that is called on the wrong kind of object, as in `db.query("select 1")` with a dot. What can fail at the server does not throw. `connect`, `prepare`, `listen` and the other methods of a connection that talk to the server return true, or false and the error message. A synchronous query does the same, and an asynchronous one calls its "error" listeners.
+From then on, a Lua error is thrown for what the module cannot work with: a query string or the name of an event that is not a string, a listener that is not a function, a parameter that is neither a string, a number, a boolean nor nil, text for `escape`, `quote` or `quote_name` that is not valid in the encoding of the connection, a method that is called on the wrong kind of object, as in `db.query("select 1")` with a dot. A zero byte is such a thing as well, in a query string, in the name of a prepared statement and in the text for `escape`, `quote` or `quote_name`, like it is in a parameter: text ends there for the server, and what is behind it would be gone without a word. Binary data goes through `escape_bytea`. What can fail at the server does not throw. `connect`, `prepare`, `listen` and the other methods of a connection that talk to the server return true, or false and the error message. A synchronous query does the same, and an asynchronous one calls its "error" listeners.
 
 Queries are asynchronous by default. `run` puts the query into a queue and returns at once, a background thread sends it to the server, and its listeners are called from the `Think` hook once the result is there. Every connection has a queue and a thread of its own: the queries of one connection run one after another, in the order they were queued, and those of different connections run side by side. An empty server only thinks if `sv_hibernate_think` is set to `1`.
 
@@ -97,7 +97,7 @@ local query = db:query_prepared("add_score")
 query:run("76561197988658543", 10)
 ```
 
-The result of a query is a list of its rows, `rows[1]` to `rows[size]`. A row is a table of its values by the names of their columns, as in `rows[1].name`. A column that is NULL is not in that table, which makes it nil. Of two columns with the same name only one is in it, the first that is not NULL. Give them names of their own to have both: `select a.name, b.name as other_name`.
+The result of a query is a list of its rows, `rows[1]` to `rows[size]`. A row is a table of its values by the names of their columns, as in `rows[1].name`. A column that is NULL is not in that table, which makes it nil. Of two columns with the same name only the first is in it, and in a row where that one is NULL the name is nil, whatever the second has. Give them names of their own to have both: `select a.name, b.name as other_name`.
 
 In a row, booleans are booleans, numbers are numbers and everything else is a string. Whole numbers beyond 2^53 are strings too, because a Lua number would round them: a 64-bit SteamID from a `bigint` column comes back as `"76561197988658543"`. A `numeric` that is not a whole number has no such way out. With more digits than a Lua number holds, which is about 15, it is rounded, unless the query casts it to `text`.
 
@@ -134,11 +134,15 @@ A connection that listens is not garbage collected: it stays, and its listeners 
 
 A connection that was lost is opened again when the next query needs it, with its encoding, its prepared statements and the channels it listens to. The queries that were on their way to the server when it was lost fail, and the details of their errors say that this is why. They are not sent again, because there is no telling which of them the server ran.
 
+A connection that the server ended while nothing was running, because it was restarted or because the connection had been idle for too long, is lost as well. The next query finds that out before it is sent, and runs on a new connection. If a transaction was open, it is gone with the old connection, and the next query fails instead, like one that was on its way: it was going to be a part of that transaction. The query after that runs on a new connection.
+
 A connection that listens does not wait for a query when it is lost. It is opened again as soon as the loss is noticed, and if that does not work, it is tried again every 5 seconds. Whatever is synchronous waits for such an attempt the way it waits for a query. Nothing of what was sent while the connection was away arrives later, which is what the "reconnect" listeners are there to be told.
+
+While the server cannot be reached, not every query waits for an attempt of its own to open the connection. After an attempt that failed, whatever needs the connection fails at once with the error of that attempt, for as long as that attempt took. So a queue of queries waits for a server that does not answer once, not once for every query. `connect` and `activate` always try.
 
 A connection that was closed with `disconnect` is not opened again by a query. Its queries fail, the ones that were still queued included, until `activate` or `connect` is called. `deactivate` closes it until something needs it. Either way it comes back like one that was lost, with its encoding, its prepared statements and its channels. A `connect` that works is what forgets all three.
 
-Whatever is synchronous waits for the queries that are on their way to the server, eight at most, but not for the ones that are queued behind them. That is a query that was set to be synchronous, and `connect`, `disconnect`, `activate`, `deactivate`, `prepare`, `unprepare`, `listen`, `unlisten` and `set_encoding`. `cancel`, `is_open`, `server_version` and `protocol_version` wait for nothing. Neither do `escape`, `quote` and `quote_name` as a rule, so that building a query does not hold up the server while another one runs. They do wait for text that is not valid UTF-8, and for all text that is not plain ASCII if the encoding of the connection is another one than UTF8.
+Whatever is synchronous waits for the queries that are on their way to the server, eight at most, but not for the ones that are queued behind them. That is a query that was set to be synchronous, and `connect`, `disconnect`, `activate`, `deactivate`, `prepare`, `unprepare`, `listen`, `unlisten` and `set_encoding`. `cancel`, `is_open`, `server_version` and `protocol_version` wait for nothing. Neither do `escape`, `quote` and `quote_name` as a rule, so that building a query does not hold up the server while another one runs. They do wait for text that is not valid UTF-8, and for all text that is not plain ASCII if the encoding of the connection is another one than UTF8. `escape` and `quote` also wait where they have to open the connection first, after `deactivate`.
 
 ### Reference
 
@@ -248,18 +252,21 @@ function DatabaseConnection:query(query_string)
 -- Create a prepared query. Whether there is such a statement only shows
 -- when it is run.
 --
--- name: ID of the prepared statement, see DatabaseConnection:prepare
+-- name: ID of the prepared statement, see DatabaseConnection:prepare. Throws
+--   an error if it is empty.
 --
 -- Returns a PreparedQuery object
 function DatabaseConnection:query_prepared(name)
 
 -- Escape dangerous characters in a string, for use between single quotes in
--- a query. The string ends at its first zero byte.
+-- a query.
 --
--- Throws an error if the string is not valid in the encoding of the
--- connection, and while the connection is closed after disconnect or
--- deactivate: how to escape depends on the server. A connection that was
--- lost still escapes.
+-- Throws an error if the string has a zero byte in it or is not valid in the
+-- encoding of the connection, and while the connection is closed after
+-- disconnect: how to escape depends on the server. A connection that was
+-- lost still escapes. One that was closed with deactivate is opened again
+-- for this, the way it is for a query, and the error is thrown if that does
+-- not work.
 --
 -- Returns an escaped string, or nothing if str is not a string
 function DatabaseConnection:escape(str)
@@ -285,11 +292,10 @@ function DatabaseConnection:unescape(escaped_str)
 -- Returns a quoted string, or nothing if str is not a string
 function DatabaseConnection:quote(str)
 
--- Quote a column name, or any other name, in double quotes. The string ends
--- at its first zero byte.
+-- Quote a column name, or any other name, in double quotes.
 --
--- Throws an error if the string is not valid in the encoding of the
--- connection.
+-- Throws an error if the string has a zero byte in it or is not valid in the
+-- encoding of the connection.
 --
 -- Returns a quoted string, or nothing if str is not a string
 function DatabaseConnection:quote_name(str)
@@ -323,8 +329,8 @@ function DatabaseConnection:server_version()
 -- Returns true if successful, false and the error message otherwise
 function DatabaseConnection:activate()
 
--- Deactivate the current connection: close it until a query needs it again.
--- Listening is no such need, nothing arrives until then.
+-- Deactivate the current connection: close it until a query needs it again,
+-- or escape or quote. Listening is no such need, nothing arrives until then.
 --
 -- Returns true
 function DatabaseConnection:deactivate()
@@ -346,7 +352,9 @@ function DatabaseConnection:prepare(name, definition)
 --
 -- name: ID of the prepared statement
 --
--- Returns true if successful, false and the error message otherwise
+-- Returns true if successful, false and the error message otherwise.
+-- Either way the statement is not prepared again when the connection is
+-- opened the next time.
 function DatabaseConnection:unprepare(name)
 
 -- Listen to a channel: what any connection sends to it with NOTIFY or
