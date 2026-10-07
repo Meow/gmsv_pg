@@ -1,45 +1,51 @@
+#ifndef _INTERFACES_H
+#define _INTERFACES_H
+
 #include <GarrysMod/Lua/Interface.h>
 #include <GarrysMod/Lua/LuaValue.h>
 #include <GarrysMod/Lua/LuaObject.h>
 #include <GarrysMod/Lua/LuaEvent.h>
 #include <pqxx/pqxx>
-#include <chrono>
+#include <charconv>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <unordered_map>
+#include <vector>
 
-#define STRING_GETTER(mn, fn) static int fn(lua_State *state) { \
-  auto obj = Pop(state, 1);                                     \
-  return LuaValue::Push(state, obj->mn);                        \
+// Methods are free to throw C++ exceptions, Lua gets them as regular errors.
+#define LUA_METHOD(name) GLOO_METHOD(name)
+
+#define STRING_GETTER(mn, fn) LUA_METHOD(fn) {  \
+  return LuaValue::Push(LUA, Pop(LUA, 1)->mn);  \
 }
-
-#define CHECK_CONNECTION auto obj = Pop(state, 1); \
-if (obj->_connection == nullptr) {\
-LUA->ThrowError("pg - no connection, connect to a database first.\n");\
-return 0;\
-}
-
-#define LUA_METHOD(name) static int name(lua_State* state)
 
 // copy-pasted from pg_type.h
-#define  TYPTYPE_BASE		'b' /* base type (ordinary scalar type) */
-#define  TYPTYPE_COMPOSITE	'c' /* composite (e.g., table's rowtype) */
-#define  TYPTYPE_DOMAIN		'd' /* domain over another type */
-#define  TYPTYPE_ENUM		'e' /* enumerated type */
-#define  TYPTYPE_PSEUDO		'p' /* pseudo-type */
-#define  TYPTYPE_RANGE		'r' /* range type */
-
-#define  TYPCATEGORY_INVALID	'\0'	/* not an allowed category */
-#define  TYPCATEGORY_ARRAY		'A'
 #define  TYPCATEGORY_BOOLEAN	'B'
-#define  TYPCATEGORY_COMPOSITE	'C'
-#define  TYPCATEGORY_DATETIME	'D'
-#define  TYPCATEGORY_ENUM		'E'
-#define  TYPCATEGORY_GEOMETRIC	'G'
-#define  TYPCATEGORY_NETWORK	'I'		/* think INET */
 #define  TYPCATEGORY_NUMERIC	'N'
-#define  TYPCATEGORY_PSEUDOTYPE 'P'
-#define  TYPCATEGORY_RANGE		'R'
-#define  TYPCATEGORY_STRING		'S'
-#define  TYPCATEGORY_TIMESPAN	'T'
-#define  TYPCATEGORY_USER		'U'
-#define  TYPCATEGORY_BITSTRING	'V'		/* er ... "varbit"? */
-#define  TYPCATEGORY_UNKNOWN	'X'
+
+// PushString measures the string itself when told that the length is zero,
+// which only works out when there is a string to measure.
+inline void push_string(GarrysMod::Lua::ILuaBase *LUA, std::string_view value) {
+  if (value.empty())
+    LUA->PushString("");
+  else
+    LUA->PushString(value.data(), (unsigned int)value.size());
+}
+
+inline std::string check_string(GarrysMod::Lua::ILuaBase *LUA, int position, const char *error) {
+  if (!LUA->IsType(position, GarrysMod::Lua::Type::String))
+    throw std::invalid_argument(error);
+
+  unsigned int length = 0;
+  const char *value = LUA->GetString(position, &length);
+  return std::string(value, length);
+}
+
+#endif

@@ -1,35 +1,44 @@
 # gmsv_pg
+
 A PostgreSQL adapter for Garry's Mod.
 
-## Installation
-The pre-compiled binaries are located in the `releases` section of this repo.
+## Installing
 
-Copy-paste the `gmsv_pg_*.dll` to your server's `lua/bin` folder, where `*` if your platform's suffix (win32 or linux). Then follow the platform-specific instructions below:
+1. Go to the "Releases" of this GitHub repository.
+2. Download the latest `.dll` file for your platform (see the table below).
+3. Copy that file to `garrysmod/lua/bin` of your server.
 
-### Windows
-1. Make sure you have Microsoft Visual C++ 2015 Redist installed
-2. Navigate to the `runtime_depends/windows` folder
-3. Copy-paste the folder's contents to your server's root (where srcds.exe is)
+| Server branch    | Windows             | Linux                 |
+|------------------|---------------------|-----------------------|
+| default (32-bit) | `gmsv_pg_win32.dll` | `gmsv_pg_linux.dll`   |
+| x86-64 (64-bit)  | `gmsv_pg_win64.dll` | `gmsv_pg_linux64.dll` |
 
-### Linux
-On Linux there are two ways to install dependencies.
+That's all there is to it. libpq, libpqxx, OpenSSL and the C++ runtime are all linked into the module, so nothing else has to be installed on the server.
 
-**via apt**
-```sh
-# make sure you have postgresql repositories added beforehand!
-sudo apt-get install libpq-dev:i386
-```
+The Linux binaries need glibc 2.35 or newer, which means Debian 12, Ubuntu 22.04 or anything more recent.
 
-**the lazy way**
-1. Navigate to `runtime_depends/linux`
-2. Copy-paste the `libpq.so.5` file to your server's root (where srcds_linux is)
+## Building
 
-Please note that even if you do the "lazy way" it might still be necessary to `apt-get` the `libpq-dev:i386` package. If you run into issues, please make sure that it's the first step that you take before complaining.
+If you have Docker installed, just run `./build.sh`. It builds the binaries for all four platforms in a container, with no other tools needed on your machine, and places them in the `pg/bin` folder. The first build takes a few minutes, because OpenSSL, libpq and libpqxx are built from source for each platform.
+
+The versions of the libraries are set at the top of the `Dockerfile`.
+
+To build without Docker:
+1. Install premake5 and a compiler that supports C++20 (GCC 13 or newer).
+2. Build static libraries of libpqxx 8, libpq and OpenSSL, and put them into `pg/deps/<system>-<architecture>/lib`, with their headers in `pg/deps/<system>-<architecture>/include` (e.g. `pg/deps/linux-x86_64`). `docker/build-deps.sh` shows how they are built for the releases. Use the `--deps=path` option of premake to keep them somewhere else.
+3. In the `pg` folder, run `premake5 gmake`.
+4. Navigate to the `project` folder and run `make config=x86` or `make config=x86_64`.
+5. The compiled binary should be in the `pg/bin` folder.
 
 ## Usage
+
 This module doesn't have all of the features implemented yet, it's being worked on.
 
 **Most of the functions are able to throw Lua errors in case of bad input. Be careful!**
+
+Queries are asynchronous by default: they run on a background thread, one after another, and their callbacks are called from the `Think` hook. An empty server only thinks if `sv_hibernate_think` is set to `1`.
+
+A connection that was lost is opened again when the next query needs it. The query that was running when it was lost fails.
 
 Here's a list of everything that is present:
 
@@ -99,13 +108,13 @@ function DatabaseConnection:protocol_version()
 -- Returns server version
 function DatabaseConnection:server_version()
 
--- Activate this connection
+-- Activate this connection: open it again if it was closed or lost
 --
 -- Avoid using this as it's done automatically most of the time.
 -- Use only if you know what you're doing.
 function DatabaseConnection:activate()
 
--- Deactivate the currect connection
+-- Deactivate the currect connection: close it until a query needs it again
 function DatabaseConnection:deactivate()
 
 -- Get whether the connection is open
@@ -136,6 +145,10 @@ function DatabaseConnection:set_encoding(encoding)
 -- DatabaseQuery class
 
 -- Execute the current query
+--
+-- Returns nothing, unless the query is synchronous:
+-- true, the result table and the amount of items in it if successful,
+-- false and the error message otherwise
 function DatabaseQuery:run()
 
 -- Set the query to be synchronous.
@@ -164,5 +177,6 @@ DatabaseQuery:on("error", function(error) end)
 -- Execute the prepared query
 --
 -- vararg: which arguments to place into the blank spots of the prepared query.
+-- Strings, numbers and booleans are supported, nil is NULL.
 function PreparedQuery:run(...)
 ```

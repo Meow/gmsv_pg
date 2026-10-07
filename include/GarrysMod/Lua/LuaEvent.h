@@ -1,14 +1,14 @@
 #ifndef _GLOO_LUA_EVENT_H_
 #define _GLOO_LUA_EVENT_H_
 
-#include <set>
+#include <map>
 #include <deque>
-#include <tuple>
 #include <mutex>
 #include <vector>
 #include <memory>
+#include <string>
 #include <sstream>
-#include <algorithm>
+#include <stdexcept>
 #include "LuaValue.h"
 #include "LuaObject.h"
 #include "GarrysMod/Lua/Interface.h"
@@ -16,16 +16,31 @@
 namespace GarrysMod {
 namespace Lua {
 
-  class ILuaEventEmitter
-  {
-  public:
-    virtual void Think(lua_State *state) = 0;
-  }; // ILuaEventEmitter
-
+  /**
+   * @brief delivers events to the listeners of event emitters
+   *
+   * Events can be emitted from any thread. Listeners are called from the main
+   * thread, on the Think hook.
+   *
+   * Listeners are stored in the metatable of the emitter's userdata rather
+   * than referenced from C++, so that a listener that refers to its emitter
+   * does not keep it from being garbage collected.
+   */
   class LuaEventEmitterManager
   {
   private:
-    std::set<std::weak_ptr<ILuaEventEmitter>> _emitters;
+    struct Event
+    {
+      int object;
+      std::string name;
+      std::vector<LuaValue> args;
+    };
+
+    std::deque<Event> _events;
+    std::mutex _events_mtx;
+    bool _hooked = false;
+    bool _closed = false;
+
     std::string _hook_name()
     {
       std::ostringstream ss;
@@ -33,303 +48,337 @@ namespace Lua {
 
       return ss.str();
     }
-    bool _hooked;
   public:
     /**
-     * @brief called every tick
-     * @param state - lua state
+     * @brief keeps the emitter at the supplied stack position from being
+     *  garbage collected until an event was delivered to it. Main thread only.
+     * @param LUA      - Lua interface
+     * @param position - lua stack position of the emitter
+     * @return reference to the emitter, to be passed to Emit
      */
-    void Think(lua_State *state)
+    int Hold(ILuaBase *LUA, int position)
     {
-      // Begin iteration of emitters
-      for (auto iter = _emitters.begin(); iter != _emitters.end();)
-      {
-        // Attempt to get shared_ptr
-        if (auto emitter = iter->lock())
-        {
-          emitter->Think(state);
-          ++iter;
-        }
-        else
-          // Shared_ptr not accessable, remove from set
-          iter = _emitters.erase(iter);
-      }
-
-      // If zero emitters stored, remove Think hook
-      if (_emitters.size() == 0)
-        resetThink(state);
+      LUA->Push(position);
+      return LUA->ReferenceCreate();
     }
 
     /**
-     * @brief inserts emitter weak_ptr to stored set and hooks Think if not
-     *  already hooked
-     * @param state - lua state
-     * @param emitter - emitter to store
+     * @brief enqueue event with supplied arguments, releasing the emitter
+     *  once the event was delivered. Can be called from any thread.
+     * @param object - emitter reference returned by Hold
+     * @param name   - event name
+     * @param args   - event args
      */
-    void RegisterEmitter(lua_State *state, std::weak_ptr<ILuaEventEmitter> emitter)
+    void Emit(int object, std::string name, std::vector<LuaValue> args = {})
     {
-      _emitters.insert(emitter);
-      hookThink(state);
+      std::lock_guard<std::mutex> lock(_events_mtx);
+
+      // Nobody is left to deliver the event to
+      if (_closed)
+        return;
+
+      _events.push_back(Event{ object, std::move(name), std::move(args) });
+    }
+
+    /**
+     * @brief called every tick
+     * @param LUA - Lua interface
+     */
+    void Think(ILuaBase *LUA)
+    {
+      std::deque<Event> events;
+
+      // Listeners are free to emit more events, don't keep the queue locked
+      {
+        std::lock_guard<std::mutex> lock(_events_mtx);
+        events.swap(_events);
+      }
+
+      for (const auto &event : events)
+        dispatch(LUA, event);
     }
   private:
-    void hookThink(lua_State *state)
+    void hookThink(ILuaBase *LUA)
     {
       if (_hooked)
         return;
 
       LUA->PushSpecial(SPECIAL_GLOB);
-        LUA->GetField(-1, "hook");
-          LUA->GetField(-1, "Add");
-            LUA->PushString("Think");
-            LUA->PushString(_hook_name().c_str());
-            LUA->PushCFunction(think);
-            LUA->Call(3, 0);
-      
+      LUA->GetField(-1, "hook");
+
+      if (!LUA->IsType(-1, Type::Table))
+      {
+        LUA->Pop(2);
+        throw std::runtime_error("unable to listen for events, the hook library is not loaded");
+      }
+
+      LUA->GetField(-1, "Add");
+        LUA->PushString("Think");
+        LUA->PushString(_hook_name().c_str());
+        LUA->PushCFunction(think);
+
+      if (LUA->PCall(3, 0, 0) != 0)
+      {
+        LUA->Pop(3);
+        throw std::runtime_error("unable to listen for events, hook.Add failed");
+      }
+
+      LUA->Pop(2);
+
       _hooked = true;
     }
 
-    void resetThink(lua_State *state)
+    /**
+     * @brief pushes every function of metatable[field][name] to the stack
+     * @param LUA       - Lua interface
+     * @param metatable - lua stack position of the emitter's metatable
+     * @return number of functions pushed
+     */
+    static int pushListeners(ILuaBase *LUA, int metatable, const char *field, const char *name)
     {
-      if (!_hooked)
-        return;
+      int count = 0;
 
+      LUA->GetField(metatable, field);
+
+      if (!LUA->IsType(-1, Type::Table))
+      {
+        LUA->Pop();
+        return 0;
+      }
+
+      LUA->GetField(-1, name);
+
+      if (!LUA->IsType(-1, Type::Table))
+      {
+        LUA->Pop(2);
+        return 0;
+      }
+
+      int list = LUA->Top();
+
+      for (int i = 1, length = LUA->ObjLen(list); i <= length; i++)
+      {
+        LUA->PushNumber(i);
+        LUA->RawGet(list);
+        count++;
+      }
+
+      // Leave nothing but the functions
+      LUA->Remove(list);
+      LUA->Remove(list - 1);
+
+      return count;
+    }
+
+    void dispatch(ILuaBase *LUA, const Event &event)
+    {
+      int top = LUA->Top();
+
+      LUA->ReferencePush(event.object);
+      LUA->ReferenceFree(event.object);
+
+      if (LUA->GetMetaTable(-1))
+      {
+        int metatable = LUA->Top();
+        int count = pushListeners(LUA, metatable, "listeners", event.name.c_str());
+        int count_once = pushListeners(LUA, metatable, "listeners_once", event.name.c_str());
+
+        // Forget the listeners that only wanted to be called once
+        if (count_once > 0)
+        {
+          LUA->GetField(metatable, "listeners_once");
+            LUA->PushNil();
+            LUA->SetField(-2, event.name.c_str());
+          LUA->Pop();
+        }
+
+        // The listeners were copied to the stack before the first one is
+        // called, they can add and remove listeners without affecting this
+        for (int i = 1; i <= count + count_once; i++)
+        {
+          LUA->Push(metatable + i);
+
+          for (const auto &arg : event.args)
+            arg.Push(LUA);
+
+          // Errors in a listener must not get in the way of the others
+          if (LUA->PCall((int)event.args.size(), 0, 0) != 0)
+            reportError(LUA);
+        }
+      }
+
+      LUA->Pop(LUA->Top() - top);
+    }
+
+    /**
+     * @brief prints the error message at the top of the stack and pops it
+     */
+    static void reportError(ILuaBase *LUA)
+    {
       LUA->PushSpecial(SPECIAL_GLOB);
-        LUA->GetField(-1, "hook");
-          LUA->GetField(-1, "Remove");
-            LUA->PushString("Think");
-            LUA->PushString(_hook_name().c_str());
-            LUA->Call(2, 0);
+      LUA->GetField(-1, "ErrorNoHalt");
 
-      _hooked = false;
+      if (!LUA->IsType(-1, Type::Function))
+      {
+        LUA->Pop(3);
+        return;
+      }
+
+      LUA->Push(-3);
+      LUA->PushString("\n");
+
+      if (LUA->PCall(2, 0, 0) != 0)
+        LUA->Pop();
+
+      LUA->Pop(2);
     }
   private:
-    static int think(lua_State *state)
+    typedef std::map<ILuaBase*, std::shared_ptr<LuaEventEmitterManager>> managers_t;
+
+    static managers_t &managers()
     {
-      Current(state).Think(state);
+      static managers_t _managers;
+      return _managers;
+    }
+
+    GLOO_METHOD(think)
+    {
+      auto manager = managers().find(LUA);
+
+      if (manager != managers().end())
+        manager->second->Think(LUA);
+
       return 0;
     }
   public:
-    static LuaEventEmitterManager& Current(lua_State *state)
+    /**
+     * @brief get the manager of the supplied Lua interface, which is hooked
+     *  to Think if it is not already. Main thread only.
+     * @param LUA - Lua interface
+     */
+    static std::shared_ptr<LuaEventEmitterManager> Current(ILuaBase *LUA)
     {
-      static std::map<lua_State*, LuaEventEmitterManager> _managers;
-      return _managers[state];
+      auto &manager = managers()[LUA];
+
+      if (!manager)
+        manager = std::make_shared<LuaEventEmitterManager>();
+
+      manager->hookThink(LUA);
+      return manager;
+    }
+
+    /**
+     * @brief drops the manager of the supplied Lua interface together with
+     *  the events it did not get to deliver. To be called when the module is
+     *  closed.
+     * @param LUA - Lua interface
+     */
+    static void Close(ILuaBase *LUA)
+    {
+      auto manager = managers().find(LUA);
+
+      if (manager == managers().end())
+        return;
+
+      {
+        std::lock_guard<std::mutex> lock(manager->second->_events_mtx);
+        manager->second->_closed = true;
+        manager->second->_events.clear();
+      }
+
+      managers().erase(manager);
     }
   }; // LuaEventEmitterManager
 
-  template<unsigned char TType, class TChildObject>
+  template<class TChildObject>
   class LuaEventEmitter :
-    public LuaObject<TType, TChildObject>
-  , public ILuaEventEmitter
+    public LuaObject<TChildObject>
   {
-  private:
-    std::map<std::string, std::vector<std::tuple<bool, int>>> _listeners;
-    std::mutex _listeners_mtx;
-    std::deque<std::tuple<std::string, std::vector<LuaValue>>> _events;
-    std::mutex _events_mtx;
-  private:
-    int _max_events_per_tick;
-  protected:
-    /**
-     * @brief get maximum number of events to process for each Think call
-     */
-    int max_events_per_tick() { return _max_events_per_tick; }
-
-    /**
-     * @brief set maximum number of events to process for each Think call
-     */
-    void max_events_per_tick(int value) { _max_events_per_tick = value; }
   public:
     LuaEventEmitter() :
-      LuaObject<TType, TChildObject>(),
-      _max_events_per_tick(100)
+      LuaObject<TChildObject>()
     {
-      LuaObject<TType, TChildObject>::AddMethod("on", on);
-      LuaObject<TType, TChildObject>::AddMethod("once", once);
-      LuaObject<TType, TChildObject>::AddMethod("add_listener", add_listener);
-      LuaObject<TType, TChildObject>::AddMethod("remove_listeners", remove_listeners);
-    }
-  public:
-    /**
-     * @brief enqueue event with supplied arguments
-     * @param name - event name
-     * @param args - event args
-     */
-    template<typename... Args>
-    void Emit(std::string name, Args ...args)
-    {
-      std::unique_lock<std::mutex> lock(_events_mtx);
-
-      std::vector<LuaValue> argv = { LuaValue(args)... };
-
-      _events.push_back(
-        std::make_tuple(name, argv)
-      );
-    }
-
-    /**
-     * @param called via LuaEventEmitterManager
-     * @param state - lua state
-     */
-    void Think(lua_State *state) override
-    {
-      std::unique_lock<std::mutex> events_lock(_events_mtx);
-
-      if (_events.empty())
-        return;
-      
-      // Limited event iteration
-      for (int i = 0; i < std::min((int)_events.size(), _max_events_per_tick); i++)
-      {
-        // Pop first event
-        auto event = _events.front();
-        auto name = std::get<0>(event);
-        auto args = std::get<1>(event);
-        _events.pop_front();
-
-        // Lock listeners vector
-        std::unique_lock<std::mutex> listeners_lock(_listeners_mtx);
-
-        // Iterate listeners
-        std::vector<std::tuple<bool, int>> &listeners = _listeners[name];
-        for (auto iter = listeners.begin(); iter != listeners.end();)
-        {
-          auto argc = 0;
-          auto once = std::get<0>(*iter);
-          auto ref = std::get<1>(*iter);
-
-          // Push reference to callback
-          LUA->ReferencePush(ref);
-
-          // Push args and increment argc
-          for (auto &arg : args)
-            argc += arg.Push(state);
-          
-          // Invoke callback with args count
-          LUA->Call(argc, 0);
-
-          // Remove if once bit is set
-          if (once)
-            iter = listeners.erase(iter);
-          else
-            ++iter;
-        }
-      }
-    }
-
-    /**
-     * @brief clears listeners vector and unrefs all supplied listeners
-     * @param state - lua state
-     */
-    void Destroy(lua_State *state) override
-    {
-      removeListeners(state);
+      LuaObject<TChildObject>::AddMethod("on", on);
+      LuaObject<TChildObject>::AddMethod("once", once);
+      LuaObject<TChildObject>::AddMethod("add_listener", add_listener);
+      LuaObject<TChildObject>::AddMethod("remove_listeners", remove_listeners);
     }
   private:
-    void addListener(lua_State *state, std::string name, int fn_ref, bool once)
+    /**
+     * @brief appends the function at stack position 3 to the listeners of
+     *  the event named at stack position 2, for the emitter at position 1
+     */
+    static void addListener(ILuaBase *LUA, bool once)
     {
-      std::unique_lock<std::mutex> lock(_listeners_mtx);
+      // Only here to check that this is called on an emitter
+      LuaObject<TChildObject>::Pop(LUA, 1);
 
-      // Store listener
-      _listeners[name].push_back(std::make_tuple(once, fn_ref));
+      if (!LUA->IsType(2, Type::String))
+        throw std::invalid_argument("bad argument #2 (string expected)");
+      if (!LUA->IsType(3, Type::Function))
+        throw std::invalid_argument("bad argument #3 (function expected)");
 
-      // Register this in event emitter manager
-      LuaEventEmitterManager::Current(state)
-        .RegisterEmitter(
-          state,
-          this->shared_from_this()
-        );
-    }
+      const char *field = once ? "listeners_once" : "listeners";
 
-    void removeListeners(lua_State *state)
-    {
-      std::unique_lock<std::mutex> lock(_listeners_mtx);
+      LUA->GetMetaTable(1);
+      LUA->GetField(-1, field);
 
-      for (auto &listeners : _listeners)
+      if (!LUA->IsType(-1, Type::Table))
       {
-        for (auto &listener : listeners.second)
-        {
-          LUA->ReferenceFree(std::get<1>(listener));
-        }
+        LUA->Pop();
+        LUA->CreateTable();
+        LUA->Push(-1);
+        LUA->SetField(-3, field);
       }
 
-      _listeners.clear();
+      LUA->GetField(-1, LUA->GetString(2));
+
+      if (!LUA->IsType(-1, Type::Table))
+      {
+        LUA->Pop();
+        LUA->CreateTable();
+        LUA->Push(-1);
+        LUA->SetField(-3, LUA->GetString(2));
+      }
+
+      LUA->PushNumber(LUA->ObjLen(-1) + 1);
+      LUA->Push(3);
+      LUA->SetTable(-3);
+      LUA->Pop(3);
     }
   private:
-    static int on(lua_State *state)
+    GLOO_METHOD(on)
     {
-      LUA->CheckType(2, Type::STRING);
-      LUA->CheckType(3, Type::FUNCTION);
-
-      auto obj = LuaObject<TType, TChildObject>::Pop(state, 1);
-      auto name = LuaValue::Pop(state, 2);
-
-      LUA->Push(3);
-      int fn_ref = LUA->ReferenceCreate();
-
-      obj->addListener(state, name, fn_ref, false);
+      addListener(LUA, false);
       return 0;
     }
 
-    static int once(lua_State *state)
+    GLOO_METHOD(once)
     {
-      LUA->CheckType(2, Type::STRING);
-      LUA->CheckType(3, Type::FUNCTION);
-
-      auto obj = LuaObject<TType, TChildObject>::Pop(state, 1);
-      auto name = LuaValue::Pop(state, 2);
-
-      LUA->Push(3);
-      int fn_ref = LUA->ReferenceCreate();
-
-      obj->addListener(state, name, fn_ref, true);
+      addListener(LUA, true);
       return 0;
     }
 
-    static int add_listener(lua_State *state)
+    GLOO_METHOD(add_listener)
     {
-      LUA->CheckType(2, Type::STRING);
-      LUA->CheckType(3, Type::FUNCTION);
-
-      auto obj = LuaObject<TType, TChildObject>::Pop(state, 1);
-      auto name = LuaValue::Pop(state, 2);
-      auto once = false;
-
-      LUA->Push(3);
-      int fn_ref = LUA->ReferenceCreate();
-
-      if (LUA->IsType(4, Type::BOOL))
-        once = LUA->GetBool(4);
-
-      obj->addListener(state, name, fn_ref, once);
+      addListener(LUA, LUA->IsType(4, Type::Bool) && LUA->GetBool(4));
       return 0;
     }
 
-    static int remove_listeners(lua_State *state)
+    GLOO_METHOD(remove_listeners)
     {
-      LuaObject<TType, TChildObject>::Pop(state, 1)->removeListeners(state);
+      LuaObject<TChildObject>::Pop(LUA, 1);
+
+      LUA->GetMetaTable(1);
+        LUA->PushNil();
+        LUA->SetField(-2, "listeners");
+        LUA->PushNil();
+        LUA->SetField(-2, "listeners_once");
+      LUA->Pop();
+
       return 0;
     }
   }; // LuaEventEmitter
-
-  /**
-   * @brief lt operator implementation for ILuaEventEmitter weak_ptr to allow weak_ptr in set
-   * @param lhs - left hand side
-   * @param rhs - right hand side
-   * @return lhs < rhs
-   */
-  bool operator < (const std::weak_ptr<ILuaEventEmitter>& lhs, const std::weak_ptr<ILuaEventEmitter>& rhs)
-  {
-    auto lhs_shared = lhs.lock();
-    auto rhs_shared = rhs.lock();
-
-    if (!lhs_shared & !rhs_shared)
-      return false;
-    
-    if (!lhs_shared) return false;
-    if (!rhs_shared) return true;
-
-    return lhs_shared < rhs_shared;
-  }
 
 }} // GarrysMod::Lua
 
