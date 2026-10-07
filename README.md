@@ -38,9 +38,11 @@ This module doesn't have all of the features implemented yet, it's being worked 
 
 Queries are asynchronous by default: they run on a background thread, one after another, and their callbacks are called from the `Think` hook. An empty server only thinks if `sv_hibernate_think` is set to `1`.
 
-Whatever is synchronous (a query that was set to be, `prepare`, `unprepare`, `listen`, `unlisten`, `set_encoding`) waits for the query that is running, but not for the ones that are queued behind it.
+Queries that are waiting in that queue are sent to the server up to eight at a time, if they have parameters or were prepared, instead of each waiting for the result of the one before. A server that saves the data of all its players at once spends far less time on the way to the database and back like that. Nothing else changes by it: they run in the order they were queued, each succeeds or fails by itself, and each gets its own result.
 
-A connection that was lost is opened again when the next query needs it, with its encoding, its prepared statements and the channels it listens to. The query that was running when it was lost fails, and the details of its error say that this is why.
+Whatever is synchronous (a query that was set to be, `prepare`, `unprepare`, `listen`, `unlisten`, `set_encoding`) waits for the queries that are on their way to the server, eight at most, but not for the ones that are queued behind them.
+
+A connection that was lost is opened again when the next query needs it, with its encoding, its prepared statements and the channels it listens to. The queries that were on their way to the server when it was lost fail, and the details of their errors say that this is why. They are not sent again, because there is no telling which of them the server ran.
 
 A query goes to the server as it is, with no transaction put around it: what it changes is there to stay as soon as it is done. Several statements in one query succeed or fail together. For a transaction that spans queries, run `BEGIN` and then `COMMIT` or `ROLLBACK` like any other query. Everything that the connection runs in between is a part of it, so whatever is not meant to be has to go over another connection. A transaction ends with the connection it was started on, whether that is lost or closed.
 

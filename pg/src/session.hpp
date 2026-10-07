@@ -1047,8 +1047,10 @@ private:
       finish(at++, true);
 
     // One that is not lost may still be in the middle of something that there
-    // was no way out of. The next query gets a new connection.
-    if (!intact || PQtransactionStatus(conn) == PQTRANS_ACTIVE) {
+    // was no way out of. The next query gets a new connection. One that is
+    // lost stays until then, as in the other run: it is still good for
+    // escaping.
+    if (PQstatus(conn) == CONNECTION_OK && (!intact || PQtransactionStatus(conn) == PQTRANS_ACTIVE)) {
       use.unlock();
       drop();
     }
@@ -1128,7 +1130,10 @@ private:
       result.error = e.what();
     }
 
-    if (count > 1 && conn) {
+    if (!conn)
+      count = 1;
+
+    if (count > 1) {
       std::vector<Job> batch(std::make_move_iterator(jobs.begin()), std::make_move_iterator(jobs.begin() + count));
 
       jobs.erase(jobs.begin(), jobs.begin() + count);
@@ -1138,7 +1143,7 @@ private:
     if (_connection)
       note_encoding(_connection->conn);
 
-    if (count > 1 && conn)
+    if (count > 1)
       return;
 
     Job job = std::move(jobs.front());
