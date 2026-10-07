@@ -37,6 +37,8 @@ private:
   std::unordered_map<pqxx::oid, char> _types;
   // Closed on purpose, as opposed to a connection that was lost.
   bool _closed = false;
+  // Whether the client encoding is UTF8, for escaping.
+  std::atomic<bool> _utf8{false};
 
   std::mutex _queue_mtx;
   std::condition_variable _queue_cv;
@@ -48,6 +50,8 @@ private:
     static std::set<Session *> all;
     return all;
   }
+
+  static constexpr long long MAX_EXACT = 1LL << 53;
 
   static std::runtime_error no_connection() {
     return std::runtime_error("pg - no connection, connect to a database first.");
@@ -76,13 +80,109 @@ private:
       }
     }
 
-    // The server forgets prepared statements along with the connection.
-    for (const auto &statement : _prepared)
-      connection->prepare(statement.first, statement.second);
+    // The server forgets prepared statements along with the connection. One
+    // that can no longer be prepared, say because its table is gone, must not
+    // keep the connection from coming back: it fails once it is run instead.
+    for (const auto &statement : _prepared) {
+      try {
+        connection->prepare(statement.first, statement.second);
+      } catch (const pqxx::sql_error &) {
+      }
+    }
+
+    note_encoding(*connection);
 
     std::lock_guard<std::mutex> lock(_connection_mtx);
     _connection = std::move(connection);
     _types = std::move(types);
+  }
+
+  // Queries are free to change the client encoding. Call with _mtx held.
+  void note_encoding(const pqxx::connection &connection) {
+    try {
+      _utf8 = connection.get_client_encoding() == "UTF8";
+    } catch (const std::exception &) {
+      _utf8 = false;
+    }
+  }
+
+  // Whether libpq is going to find the text well formed UTF8. This has to be
+  // as strict as libpq is, see escaping.
+  static bool valid_utf8(std::string_view text) {
+    auto at = reinterpret_cast<const unsigned char *>(text.data());
+    size_t left = text.size();
+
+    while (left > 0) {
+      unsigned char lead = at[0], low = 0x80, high = 0xBF;
+      size_t length;
+
+      if (lead < 0x80) {
+        at++;
+        left--;
+        continue;
+      }
+
+      if (lead >= 0xC2 && lead <= 0xDF)
+        length = 2;
+      else if (lead >= 0xE0 && lead <= 0xEF)
+        length = 3;
+      else if (lead >= 0xF0 && lead <= 0xF4)
+        length = 4;
+      else
+        return false;
+
+      if (left < length)
+        return false;
+
+      // Neither overlong forms, nor surrogates, nor anything past U+10FFFF.
+      if (lead == 0xE0)
+        low = 0xA0;
+      else if (lead == 0xED)
+        high = 0x9F;
+      else if (lead == 0xF0)
+        low = 0x90;
+      else if (lead == 0xF4)
+        high = 0x8F;
+
+      if (at[1] < low || at[1] > high)
+        return false;
+
+      for (size_t i = 2; i < length; i++) {
+        if (at[i] < 0x80 || at[i] > 0xBF)
+          return false;
+      }
+
+      at += length;
+      left -= length;
+    }
+
+    return true;
+  }
+
+  static bool ascii(std::string_view text) {
+    for (unsigned char c : text) {
+      if (c >= 0x80)
+        return false;
+    }
+
+    return true;
+  }
+
+  // To be held while libpq escapes the text. Escaping does not wait for the
+  // query that may be running, building a query must not stall the main thread
+  // on one. That is fine as long as libpq only reads the connection for it,
+  // which is the case for text that is well formed. For text that is not it
+  // writes an error message into the connection, which the running query may
+  // be doing just then, so such text does wait: the lock that is returned is
+  // locked. What is well formed is only known here for UTF8, in any other
+  // encoding that goes for everything but ASCII.
+  std::unique_lock<std::mutex> escaping(std::string_view text) {
+    std::unique_lock<std::mutex> lock(_mtx, std::defer_lock);
+
+    if (!(_utf8 ? valid_utf8(text) : ascii(text)))
+      lock.lock();
+
+    return lock;
   }
 
   // The connection, ready for use. libpqxx no longer reconnects by itself, so
@@ -106,6 +206,16 @@ private:
   static LuaValue number(std::string_view text) {
     double value = 0;
     const char *end = text.data() + text.size();
+
+    // Neither does every number fit a Lua number, which holds whole numbers
+    // up to 2^53 exactly. Beyond that it would be rounded to another number,
+    // which a 64-bit SteamID does not survive, so those stay text as well.
+    long long whole = 0;
+    auto parsed_whole = std::from_chars(text.data(), end, whole);
+
+    if (parsed_whole.ptr == end && (parsed_whole.ec != std::errc() || whole > MAX_EXACT || whole < -MAX_EXACT))
+      return LuaValue(std::string(text));
+
     auto parsed = std::from_chars(text.data(), end, value);
 
     if (parsed.ec == std::errc() && parsed.ptr == end)
@@ -193,16 +303,25 @@ public:
   Session(const Session &) = delete;
   Session &operator=(const Session &) = delete;
 
-  // Connects to the database, replacing the current connection if any.
+  // Connects to the database, replacing the current connection if any. If
+  // that fails, the current connection stays the way it is.
   void Connect(std::string options) {
     std::lock_guard<std::mutex> lock(_mtx);
 
-    _options = std::move(options);
-    _encoding.clear();
-    _prepared.clear();
-    _closed = false;
+    std::swap(_options, options);
+    auto encoding = std::exchange(_encoding, {});
+    auto prepared = std::exchange(_prepared, {});
 
-    open();
+    try {
+      open();
+    } catch (...) {
+      _options = std::move(options);
+      _encoding = std::move(encoding);
+      _prepared = std::move(prepared);
+      throw;
+    }
+
+    _closed = false;
   }
 
   void Disconnect() {
@@ -238,6 +357,11 @@ public:
   }
 
   void Prepare(const std::string &name, const std::string &definition) {
+    // The statement without a name is the one that a query with parameters
+    // uses, it would not last.
+    if (name.empty())
+      throw std::invalid_argument("pg - prepared query name is empty");
+
     std::lock_guard<std::mutex> lock(_mtx);
 
     ready().prepare(name, definition);
@@ -246,16 +370,57 @@ public:
 
   void Unprepare(const std::string &name) {
     std::lock_guard<std::mutex> lock(_mtx);
+    auto &connection = ready();
 
-    ready().unprepare(name);
+    // Off the record first: whether the server still knew the statement or
+    // not, it is not to come back with the next connection.
     _prepared.erase(name);
+    connection.unprepare(name);
   }
 
   void SetEncoding(const std::string &encoding) {
     std::lock_guard<std::mutex> lock(_mtx);
+    auto &connection = ready();
 
-    ready().set_client_encoding(encoding);
+    connection.set_client_encoding(encoding);
     _encoding = encoding;
+    note_encoding(connection);
+  }
+
+  std::string Escape(const std::string &text) {
+    auto lock = escaping(text);
+
+    return Peek()->esc(text);
+  }
+
+  std::string Quote(const std::string &text) {
+    auto lock = escaping(text);
+
+    return Peek()->quote(text);
+  }
+
+  std::string QuoteName(const std::string &text) {
+    auto lock = escaping(text);
+    auto connection = Peek();
+
+    if (lock.owns_lock())
+      return connection->quote_name(text);
+
+    // libpq clears the error message of the connection for this one, whatever
+    // the text is, so it only gets the text that waited for the running query.
+    // What it does to well formed text is simple enough. Like everything that
+    // goes to the server, the text ends at the first zero byte.
+    std::string quoted = "\"";
+
+    for (char c : std::string_view(text).substr(0, text.find('\0'))) {
+      if (c == '"')
+        quoted += c;
+
+      quoted += c;
+    }
+
+    quoted += '"';
+    return quoted;
   }
 
   // The connection, for what does not send anything to the server: escaping,
@@ -286,6 +451,9 @@ public:
     } catch (const std::exception &e) {
       result.error = e.what();
     }
+
+    if (_connection)
+      note_encoding(*_connection);
 
     return result;
   }

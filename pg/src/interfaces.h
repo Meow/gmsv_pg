@@ -6,6 +6,7 @@
 #include <GarrysMod/Lua/LuaObject.h>
 #include <GarrysMod/Lua/LuaEvent.h>
 #include <pqxx/pqxx>
+#include <atomic>
 #include <charconv>
 #include <condition_variable>
 #include <deque>
@@ -13,10 +14,12 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 // Methods are free to throw C++ exceptions, Lua gets them as regular errors.

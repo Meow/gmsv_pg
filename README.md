@@ -38,7 +38,19 @@ This module doesn't have all of the features implemented yet, it's being worked 
 
 Queries are asynchronous by default: they run on a background thread, one after another, and their callbacks are called from the `Think` hook. An empty server only thinks if `sv_hibernate_think` is set to `1`.
 
-A connection that was lost is opened again when the next query needs it. The query that was running when it was lost fails.
+Whatever is synchronous (a query that was set to be, `prepare`, `unprepare`, `set_encoding`) waits for the query that is running, but not for the ones that are queued behind it.
+
+A connection that was lost is opened again when the next query needs it, with its encoding and its prepared statements. The query that was running when it was lost fails.
+
+Values that come from outside, like the name of a player, are best kept out of the query itself and passed to `run` as parameters instead:
+
+```lua
+local query = db:query("select * from players where name = $1 and score > $2")
+query:on("success", function(rows, size) end)
+query:run(ply:Nick(), 100)
+```
+
+In the rows of a result, booleans are booleans, numbers are numbers and everything else is a string. NULL is nil. Whole numbers beyond 2^53 are strings too, because a Lua number would round them: a 64-bit SteamID from a `bigint` column comes back as `"76561198012345678"`.
 
 Here's a list of everything that is present:
 
@@ -56,6 +68,14 @@ pg.version_suffix
 -- DatabaseConnection class
 
 -- Connect to the specified database.
+--
+-- host, user, password and db are taken as they are, spaces and quotes
+-- included. extra_string_to_append is a piece of libpq connection string,
+-- e.g. "sslmode=require connect_timeout=5". What it sets wins over the
+-- other arguments.
+--
+-- Returns true if successful, false and the error message otherwise.
+-- If it fails, a connection that was there before stays as it was.
 function DatabaseConnection:connect(host, user, password, db, port, extra_string_to_append)
 
 -- Disconnect from current database.
@@ -76,13 +96,20 @@ function DatabaseConnection:query(query_string)
 function DatabaseConnection:query_prepared(name)
 
 -- Escape dangerous characters in a string.
+-- Throws an error if the string is not valid in the encoding of the connection.
 --
 -- Returns an escaped string
 function DatabaseConnection:escape(str)
 
--- Return the escaped string back to normal
+-- Turn binary data into the text that a bytea column takes ("\x00ff"),
+-- as a parameter or, quoted, inside of a query.
 --
--- Returns a normal string
+-- Returns a string
+function DatabaseConnection:escape_bytea(data)
+
+-- Turn the value of a bytea column back into binary data
+--
+-- Returns a string
 function DatabaseConnection:unescape(escaped_str)
 
 -- Quote a string
@@ -122,8 +149,8 @@ function DatabaseConnection:is_open()
 
 -- Prepare a query (register it with the server)
 --
--- name: ID of the prepared statement
--- definition: the query itself
+-- name: ID of the prepared statement, must not be empty
+-- definition: the query itself, with $1, $2 and so on for its parameters
 --
 -- Returns true if successful
 function DatabaseConnection:prepare(name, definition)
@@ -146,10 +173,14 @@ function DatabaseConnection:set_encoding(encoding)
 
 -- Execute the current query
 --
+-- vararg: the values of $1, $2 and so on in the query, if it has any.
+-- See PreparedQuery:run for what they can be. A query that is given
+-- parameters has to be a single statement.
+--
 -- Returns nothing, unless the query is synchronous:
 -- true, the result table and the amount of items in it if successful,
 -- false and the error message otherwise
-function DatabaseQuery:run()
+function DatabaseQuery:run(...)
 
 -- Set the query to be synchronous.
 -- This will lock the current thread while the query is being executed.
@@ -177,7 +208,12 @@ DatabaseQuery:on("error", function(error) end)
 -- Execute the prepared query
 --
 -- vararg: which arguments to place into the blank spots of the prepared query.
--- Strings, numbers and booleans are supported, nil is NULL.
+-- Strings, numbers and booleans are supported, nil is NULL. Anything else
+-- throws an error, and so does a string with a zero byte in it: binary data
+-- goes through DatabaseConnection:escape_bytea first.
+--
+-- The server has to know the type of every parameter. Where it cannot tell
+-- from the query, say so: "select $1::int".
 function PreparedQuery:run(...)
 ```
 

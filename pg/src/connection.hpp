@@ -32,6 +32,23 @@ private:
     LUA->PushBool(true);
     return 1;
   }
+
+  // A value the way the connection string takes any: in quotes, which are
+  // what an empty one or one with spaces in it needs, with a backslash in
+  // front of the two characters that mean something inside of them.
+  static std::string conninfo_value(const std::string &value) {
+    std::string quoted = "'";
+
+    for (char c : value) {
+      if (c == '\'' || c == '\\')
+        quoted += '\\';
+
+      quoted += c;
+    }
+
+    quoted += '\'';
+    return quoted;
+  }
 public:
   std::string name() override { return "#<DatabaseConnection>"; }
 public:
@@ -45,6 +62,7 @@ public:
     AddMethod("query_prepared", query_prepared);
     AddMethod("connect", connect);
     AddMethod("escape", escape);
+    AddMethod("escape_bytea", escape_bytea);
     AddMethod("unescape", unescape);
     AddMethod("quote", quote);
     AddMethod("quote_name", quote_name);
@@ -100,21 +118,22 @@ public:
     else
       obj->_port = "";
 
-    connection_string += "host=" + obj->_host;
-    connection_string += " user=" + obj->_user;
+    connection_string += "host=" + conninfo_value(obj->_host);
+    connection_string += " user=" + conninfo_value(obj->_user);
 
     if (password.type() == Type::String)
-      connection_string += " password=" + obj->_password;
+      connection_string += " password=" + conninfo_value(obj->_password);
 
     if (database.type() == Type::String)
-      connection_string += " dbname=" + obj->_database;
+      connection_string += " dbname=" + conninfo_value(obj->_database);
 
     if (!obj->_port.empty())
-      connection_string += " port=" + obj->_port;
+      connection_string += " port=" + conninfo_value(obj->_port);
 
     // Goes last, because libpq uses the last occurrence of a keyword: what is
     // in extra overrides the arguments above. A hostaddr in it is the address
-    // that gets connected to, whatever the host is.
+    // that gets connected to, whatever the host is. Unlike the arguments, it
+    // is a piece of connection string already and goes in as it is.
     if (extra.type() == Type::String)
       connection_string += " " + std::string(extra);
 
@@ -122,12 +141,26 @@ public:
   }
 
   LUA_METHOD(escape) {
+    auto obj = Pop(LUA, 1);
+    obj->_session->Peek();
+
+    if (!LUA->IsType(2, Type::String))
+      return 0;
+
+    push_string(LUA, obj->_session->Escape(check_string(LUA, 2, "")));
+    return 1;
+  }
+
+  // The counterpart of unescape: binary data as the text that a bytea takes,
+  // be it as a parameter or, quoted, inside of a query.
+  LUA_METHOD(escape_bytea) {
     auto connection = Pop(LUA, 1)->_session->Peek();
 
     if (!LUA->IsType(2, Type::String))
       return 0;
 
-    push_string(LUA, connection->esc(check_string(LUA, 2, "")));
+    std::string raw = check_string(LUA, 2, "");
+    push_string(LUA, connection->esc_raw(pqxx::binary_cast(raw)));
     return 1;
   }
 
@@ -143,22 +176,24 @@ public:
   }
 
   LUA_METHOD(quote) {
-    auto connection = Pop(LUA, 1)->_session->Peek();
+    auto obj = Pop(LUA, 1);
+    obj->_session->Peek();
 
     if (!LUA->IsType(2, Type::String))
       return 0;
 
-    push_string(LUA, connection->quote(check_string(LUA, 2, "")));
+    push_string(LUA, obj->_session->Quote(check_string(LUA, 2, "")));
     return 1;
   }
 
   LUA_METHOD(quote_name) {
-    auto connection = Pop(LUA, 1)->_session->Peek();
+    auto obj = Pop(LUA, 1);
+    obj->_session->Peek();
 
     if (!LUA->IsType(2, Type::String))
       return 0;
 
-    push_string(LUA, connection->quote_name(check_string(LUA, 2, "")));
+    push_string(LUA, obj->_session->QuoteName(check_string(LUA, 2, "")));
     return 1;
   }
 
@@ -201,7 +236,12 @@ public:
   LUA_METHOD(cancel) {
     auto connection = Pop(LUA, 1)->_session->Peek();
 
-    return attempt(LUA, [&] { connection->cancel_query(); });
+    return attempt(LUA, [&] {
+      if (!connection->is_open())
+        throw std::runtime_error("pg - connection is closed, there is nothing to cancel.");
+
+      connection->cancel_query();
+    });
   }
 
   LUA_METHOD(prepare) {
