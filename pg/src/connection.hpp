@@ -100,7 +100,7 @@ public:
     else
       obj->_port = "";
 
-    connection_string += "hostaddr=" + obj->_host;
+    connection_string += "host=" + obj->_host;
     connection_string += " user=" + obj->_user;
 
     if (password.type() == Type::String)
@@ -112,6 +112,9 @@ public:
     if (!obj->_port.empty())
       connection_string += " port=" + obj->_port;
 
+    // Goes last, because libpq uses the last occurrence of a keyword: what is
+    // in extra overrides the arguments above. A hostaddr in it is the address
+    // that gets connected to, whatever the host is.
     if (extra.type() == Type::String)
       connection_string += " " + std::string(extra);
 
