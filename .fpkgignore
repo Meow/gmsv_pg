@@ -1,0 +1,11 @@
+# The package holds the spec, the readme, the changelog, the licenses and the
+# binaries (with pg/bin/LICENSES.txt) only.
+/*
+!/packagespec.lua
+!/README.md
+!/CHANGELOG.md
+!/LICENSE.md
+!/LICENSE_GLOO.md
+!/pg/
+/pg/*
+!/pg/bin/

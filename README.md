@@ -4,6 +4,10 @@ A PostgreSQL adapter for Garry's Mod.
 
 ## Installing
 
+In a gamemode project that fpkg manages, such as a Flux schema, run `fpkg add gmsv_pg`, or let the module arrive as a dependency of another package. `fpkg install` copies the four modules to `garrysmod/lua/bin` of the server, when it runs inside the server folder or is given `--server <server folder>`. `pg/bin/LICENSES.txt` comes with them in the package.
+
+Without fpkg:
+
 1. Go to the "Releases" of this GitHub repository.
 2. Download the latest `.dll` file for your platform (see the table below).
 3. Copy that file to `garrysmod/lua/bin` of your server.
@@ -33,6 +37,12 @@ To build without Docker, on Linux and for Linux:
 5. The compiled binary should be in the `pg/bin` folder.
 
 The Windows binaries are built on Linux as well, with MinGW-w64, from libraries in `pg/deps/windows-x86` and `pg/deps/windows-x86_64`. Run `premake5 --os=windows gmake` in step 3, and tell make which compiler that is in step 4, the way the `Dockerfile` does: `make config=x86_64 CC=x86_64-w64-mingw32-gcc CXX=x86_64-w64-mingw32-g++ AR=x86_64-w64-mingw32-ar`, and the same with `i686-w64-mingw32` for `config=x86`.
+
+## Publishing to fpkg
+
+`./build.sh` writes all four binaries to `pg/bin`, the binaries folder that `packagespec.lua` names, together with `LICENSES.txt`. Bump `s.version` in `packagespec.lua`, run `fpkg check`, and `fpkg pack --list` to see what ships: `packagespec.lua`, this README, the changelog, the license files and the contents of `pg/bin`, nothing else. `fpkg publish` uploads it.
+
+To use a local build in a gamemode project before it is published, run `fpkg link <path to this checkout>` there, followed by `fpkg install`.
 
 ## Usage
 
