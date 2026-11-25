@@ -2,6 +2,16 @@
 
 All notable changes to gmsv_pg in 2026. The previous release, 1.0.2, dates from March 2019.
 
+## 2.1.0 - 2026-11-25
+
+### Changed
+
+- libpq is updated from 18.6 to 19.0. The module uses nothing that changed between the two. OpenSSL 3.5.9, premake 5.0.0, the Garry's Mod module headers and gloo were already the current versions.
+
+### Documentation
+
+- PostgreSQL 14 reached its end of life on 2026-11-12, so the README names 15 as the oldest supported server.
+
 ## 2.0.0 - 2026-10-07
 
 A rewrite of the module around libpq itself, built for all four Garry's Mod server platforms. Most of the Lua API is unchanged, but see "Breaking changes" before upgrading.

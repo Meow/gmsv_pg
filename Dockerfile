@@ -20,8 +20,8 @@ RUN curl -fsSL -o /tmp/premake.tar.gz \
 
 ARG OPENSSL_VERSION=3.5.9
 ARG OPENSSL_SHA256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
-ARG POSTGRES_VERSION=18.6
-ARG POSTGRES_SHA256=555610c24d53e4316da5b7d3fc25c279d96856d5e0e23ee308c328c5fa881d9f
+ARG POSTGRES_VERSION=19.0
+ARG POSTGRES_SHA256=a89fd70efbad6a08c7dbed8d4872e3af30170d9e5ca9dc7906523be95b4e692d
 RUN mkdir -p /deps/src/openssl /deps/src/postgresql \
  && cd /tmp \
  && curl -fsSL -o openssl.tar.gz \

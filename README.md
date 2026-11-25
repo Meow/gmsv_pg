@@ -21,7 +21,7 @@ That's all there is to it. libpq, OpenSSL and the C++ runtime are all linked int
 
 The Linux binaries need glibc 2.35 or newer, which means Debian 12, Ubuntu 22.04 or anything more recent.
 
-The database can be any version of PostgreSQL that is supported upstream, which currently means 14 and newer.
+The database can be any version of PostgreSQL that is supported upstream, which currently means 15 and newer.
 
 ## Building
 
@@ -31,7 +31,7 @@ The versions of the libraries are set at the top of the `Dockerfile`.
 
 To build without Docker, on Linux and for Linux:
 1. Install premake5 and a compiler that supports C++17 (GCC 11 or newer). The 32-bit build on a 64-bit system needs `gcc-multilib` and `g++-multilib` as well.
-2. Build static libraries of libpq (version 17 or newer) and OpenSSL. The module is linked with `libpq.a`, `libpgcommon_shlib.a`, `libpgport_shlib.a`, `libssl.a` and `libcrypto.a`, which go into `pg/deps/<system>-<architecture>/lib`, and compiled with `libpq-fe.h` and `postgres_ext.h`, which go into `pg/deps/<system>-<architecture>/include`. The system is `linux` or `windows`, the architecture `x86` or `x86_64`, e.g. `pg/deps/linux-x86_64`. The `postgres_ext.h` of libpq 17 wants `pg_config_ext.h` next to it, that of libpq 18 gets by alone. `docker/build-deps.sh` shows how the libraries are built for the releases. Use the `--deps=path` option of premake to keep them somewhere else.
+2. Build static libraries of libpq (version 17 or newer) and OpenSSL. The module is linked with `libpq.a`, `libpgcommon_shlib.a`, `libpgport_shlib.a`, `libssl.a` and `libcrypto.a`, which go into `pg/deps/<system>-<architecture>/lib`, and compiled with `libpq-fe.h` and `postgres_ext.h`, which go into `pg/deps/<system>-<architecture>/include`. The system is `linux` or `windows`, the architecture `x86` or `x86_64`, e.g. `pg/deps/linux-x86_64`. The `postgres_ext.h` of libpq 17 wants `pg_config_ext.h` next to it, those of libpq 18 and newer get by alone. `docker/build-deps.sh` shows how the libraries are built for the releases. Use the `--deps=path` option of premake to keep them somewhere else.
 3. In the `pg` folder, run `premake5 gmake`.
 4. Navigate to the `project` folder and run `make config=x86` or `make config=x86_64`.
 5. The compiled binary should be in the `pg/bin` folder.
